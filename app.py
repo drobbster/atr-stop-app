@@ -266,6 +266,35 @@ def calculate_best_stop(
     }
 
 
+def build_stop_price_history(
+    df: pd.DataFrame,
+    strategy_type: str,
+    direction: str,
+    override_regime: Optional[str] = None,
+    custom_multiplier: Optional[float] = None,
+) -> pd.DataFrame:
+    chart_df = df.copy()
+
+    if custom_multiplier is not None:
+        chart_df["ATR Multiplier"] = float(custom_multiplier)
+    elif override_regime:
+        chart_df["ATR Multiplier"] = ATR_MULTIPLIERS[strategy_type][override_regime]
+    else:
+        chart_df["ATR Multiplier"] = (
+            chart_df["Volatility_Regime"]
+            .map(ATR_MULTIPLIERS[strategy_type])
+            .fillna(ATR_MULTIPLIERS[strategy_type]["Normal"])
+        )
+
+    chart_df["Stop Distance"] = chart_df["ATR"] * chart_df["ATR Multiplier"]
+    if direction.lower() == "short":
+        chart_df["Stop Price"] = chart_df["Close"] + chart_df["Stop Distance"]
+    else:
+        chart_df["Stop Price"] = chart_df["Close"] - chart_df["Stop Distance"]
+
+    return chart_df
+
+
 def calculate_position_size(
     account_size: float,
     risk_pct: float,
@@ -326,6 +355,13 @@ def generate_stop_for_ticker(
     ticker_type = classify_ticker_type(ticker, info)
 
     regime = override_regime if override_regime else vol_summary["volatility_regime"]
+    df = build_stop_price_history(
+        df=df,
+        strategy_type=strategy_type,
+        direction=direction,
+        override_regime=override_regime,
+        custom_multiplier=custom_multiplier,
+    )
 
     stop = calculate_best_stop(
         entry_price=vol_summary["entry_price"],
@@ -441,6 +477,16 @@ multiplier_table.index = [STRATEGY_LABELS[idx] for idx in multiplier_table.index
 st.dataframe(multiplier_table, use_container_width=True)
 
 
+for key, initial_value in {
+    "results": [],
+    "history_by_ticker": {},
+    "summaries_by_ticker": {},
+    "errors": [],
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = initial_value
+
+
 if run_button:
     tickers = clean_tickers(raw_tickers)
 
@@ -485,61 +531,74 @@ if run_button:
             except Exception as exc:
                 errors.append({"Ticker": ticker, "Error": str(exc)})
 
-    if results:
-        st.subheader("Stop Results")
-        result_df = pd.DataFrame(results)
-        st.dataframe(result_df, use_container_width=True)
+    st.session_state.results = results
+    st.session_state.history_by_ticker = history_by_ticker
+    st.session_state.summaries_by_ticker = summaries_by_ticker
+    st.session_state.errors = errors
 
-        csv = result_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV",
-            data=csv,
-            file_name="atr_stop_results.csv",
-            mime="text/csv",
-        )
+if st.session_state.results:
+    st.subheader("Stop Results")
+    result_df = pd.DataFrame(st.session_state.results)
+    st.dataframe(result_df, use_container_width=True)
 
-        selected = st.selectbox("View chart/details for ticker", options=list(history_by_ticker.keys()))
+    csv = result_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download CSV",
+        data=csv,
+        file_name="atr_stop_results.csv",
+        mime="text/csv",
+    )
 
-        hist = history_by_ticker[selected].copy()
-        summary = summaries_by_ticker[selected]
+    available_tickers = list(st.session_state.history_by_ticker.keys())
+    if st.session_state.get("selected_ticker") not in available_tickers:
+        st.session_state.selected_ticker = available_tickers[0]
 
-        st.subheader(f"{selected} Price and ATR")
-        chart_df = hist[["Close", "ATR"]].dropna()
-        st.line_chart(chart_df)
+    selected = st.selectbox(
+        "View chart/details for ticker",
+        options=available_tickers,
+        key="selected_ticker",
+    )
 
-        detail_cols = st.columns(4)
-        detail_cols[0].metric("Latest Close", f"${summary['entry_price']:.2f}")
-        detail_cols[1].metric("ATR", f"${summary['atr']:.2f}")
-        detail_cols[2].metric("Combined Regime", summary["volatility_regime"])
-        detail_cols[3].metric("Regime Score", f"{summary['regime_score']:.2f}")
+    hist = st.session_state.history_by_ticker[selected].copy()
+    summary = st.session_state.summaries_by_ticker[selected]
 
-        st.subheader(f"{selected} Regime Details")
-        regime_detail = pd.DataFrame(
-            [
-                {
-                    "Signal": "ATR Ratio",
-                    "Value": round(summary["atr_ratio"], 3) if not pd.isna(summary["atr_ratio"]) else np.nan,
-                    "Regime": summary["atr_regime"],
-                },
-                {
-                    "Signal": "Bollinger Width Ratio",
-                    "Value": round(summary["bb_ratio"], 3) if not pd.isna(summary["bb_ratio"]) else np.nan,
-                    "Regime": summary["bb_regime"],
-                },
-                {
-                    "Signal": "VIX Ratio",
-                    "Value": round(summary["vix_ratio"], 3) if not pd.isna(summary["vix_ratio"]) else np.nan,
-                    "Regime": summary["vix_regime"],
-                },
-            ]
-        )
-        st.dataframe(regime_detail, use_container_width=True)
+    st.subheader(f"{selected} Close vs Stop Price")
+    chart_df = hist[["Close", "Stop Price"]].dropna()
+    st.line_chart(chart_df)
 
-    if errors:
-        st.subheader("Errors")
-        st.dataframe(pd.DataFrame(errors), use_container_width=True)
+    detail_cols = st.columns(4)
+    detail_cols[0].metric("Latest Close", f"${summary['entry_price']:.2f}")
+    detail_cols[1].metric("ATR", f"${summary['atr']:.2f}")
+    detail_cols[2].metric("Combined Regime", summary["volatility_regime"])
+    detail_cols[3].metric("Regime Score", f"{summary['regime_score']:.2f}")
 
-else:
+    st.subheader(f"{selected} Regime Details")
+    regime_detail = pd.DataFrame(
+        [
+            {
+                "Signal": "ATR Ratio",
+                "Value": round(summary["atr_ratio"], 3) if not pd.isna(summary["atr_ratio"]) else np.nan,
+                "Regime": summary["atr_regime"],
+            },
+            {
+                "Signal": "Bollinger Width Ratio",
+                "Value": round(summary["bb_ratio"], 3) if not pd.isna(summary["bb_ratio"]) else np.nan,
+                "Regime": summary["bb_regime"],
+            },
+            {
+                "Signal": "VIX Ratio",
+                "Value": round(summary["vix_ratio"], 3) if not pd.isna(summary["vix_ratio"]) else np.nan,
+                "Regime": summary["vix_regime"],
+            },
+        ]
+    )
+    st.dataframe(regime_detail, use_container_width=True)
+
+if st.session_state.errors:
+    st.subheader("Errors")
+    st.dataframe(pd.DataFrame(st.session_state.errors), use_container_width=True)
+
+if not run_button and not st.session_state.results:
     st.info("Enter tickers and click **Calculate Stops**.")
 
 st.caption(
