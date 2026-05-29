@@ -122,26 +122,24 @@ def close_mobile_sidebar() -> None:
                     return;
                 }
 
-                const selectors = [
-                    'button[aria-label="Close sidebar"]',
-                    'button[title="Close sidebar"]',
-                    'button[aria-label="Collapse sidebar"]',
-                    'button[title="Collapse sidebar"]',
-                    '[data-testid="stSidebarCollapseButton"] button',
-                    '[data-testid="stSidebar"] button'
-                ];
-
-                for (const selector of selectors) {
-                    const button = parentDoc.querySelector(selector);
-                    if (button && button.offsetParent !== null) {
+                const buttons = Array.from(parentDoc.querySelectorAll("button"));
+                for (const button of buttons) {
+                    const label = `${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""}`;
+                    const isCloseControl = /close sidebar|collapse sidebar/i.test(label);
+                    if (isCloseControl && button.offsetParent !== null) {
                         button.click();
-                        return;
+                        return true;
                     }
                 }
+
+                return false;
             };
 
-            setTimeout(closeSidebar, 250);
-            setTimeout(closeSidebar, 750);
+            setTimeout(() => {
+                if (!closeSidebar()) {
+                    setTimeout(closeSidebar, 500);
+                }
+            }, 250);
         })();
         </script>
         """,
