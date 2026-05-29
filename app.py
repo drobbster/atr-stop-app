@@ -115,60 +115,47 @@ def close_mobile_sidebar() -> None:
         """
         <script>
         (() => {
+            let clicked = false;
+
             const closeSidebar = () => {
+                if (clicked) {
+                    return true;
+                }
+
                 const parentDoc = window.parent.document;
                 const isMobile = window.parent.innerWidth <= 768;
                 if (!isMobile) {
-                    return "not-mobile";
+                    return false;
                 }
 
-                const sidebar = parentDoc.querySelector('[data-testid="stSidebar"]');
-                if (!sidebar) {
-                    return "no-sidebar";
-                }
+                const selectors = [
+                    'button[aria-label="Close sidebar"]',
+                    'button[title="Close sidebar"]',
+                    'button[aria-label="Collapse sidebar"]',
+                    'button[title="Collapse sidebar"]',
+                    '[data-testid="stSidebarCollapseButton"] button',
+                    '[data-testid="stSidebarCollapseButton"]',
+                    '[data-testid="stSidebar"] button'
+                ];
 
-                const sidebarRect = sidebar.getBoundingClientRect();
-                const sidebarStyle = window.parent.getComputedStyle(sidebar);
-                const sidebarIsOpen =
-                    sidebarRect.width > 0 &&
-                    sidebarRect.right > 0 &&
-                    sidebarRect.left < window.parent.innerWidth &&
-                    sidebarStyle.display !== "none" &&
-                    sidebarStyle.visibility !== "hidden";
-
-                if (!sidebarIsOpen) {
-                    return "already-closed";
-                }
-
-                const explicitControls = Array.from(
-                    parentDoc.querySelectorAll(
-                        '[data-testid="stSidebarCollapseButton"], ' +
-                        '[data-testid="stSidebarCollapseButton"] button, ' +
-                        'button[aria-label*="sidebar" i], ' +
-                        'button[title*="sidebar" i]'
-                    )
-                );
-                const sidebarTopButtons = Array.from(sidebar.querySelectorAll("button")).filter((button) => {
-                    const rect = button.getBoundingClientRect();
-                    return rect.top <= sidebarRect.top + 90;
-                });
-
-                for (const control of [...explicitControls, ...sidebarTopButtons]) {
-                    const rect = control.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        control.click();
-                        return "clicked";
+                for (const selector of selectors) {
+                    const control = parentDoc.querySelector(selector);
+                    if (control) {
+                        const rect = control.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            clicked = true;
+                            control.click();
+                            return true;
+                        }
                     }
                 }
 
-                return "not-found";
+                return false;
             };
 
-            setTimeout(() => {
-                if (closeSidebar() === "not-found") {
-                    setTimeout(closeSidebar, 500);
-                }
-            }, 250);
+            setTimeout(closeSidebar, 150);
+            setTimeout(closeSidebar, 400);
+            setTimeout(closeSidebar, 900);
         })();
         </script>
         """,
