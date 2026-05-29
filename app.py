@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
 
@@ -107,6 +108,46 @@ def score_to_regime(score: float) -> str:
     if score > 1.50:
         return "High"
     return "Normal"
+
+
+def close_mobile_sidebar() -> None:
+    components.html(
+        """
+        <script>
+        (() => {
+            const closeSidebar = () => {
+                const parentDoc = window.parent.document;
+                const isMobile = window.parent.innerWidth <= 768;
+                if (!isMobile) {
+                    return;
+                }
+
+                const selectors = [
+                    'button[aria-label="Close sidebar"]',
+                    'button[title="Close sidebar"]',
+                    'button[aria-label="Collapse sidebar"]',
+                    'button[title="Collapse sidebar"]',
+                    '[data-testid="stSidebarCollapseButton"] button',
+                    '[data-testid="stSidebar"] button'
+                ];
+
+                for (const selector of selectors) {
+                    const button = parentDoc.querySelector(selector);
+                    if (button && button.offsetParent !== null) {
+                        button.click();
+                        return;
+                    }
+                }
+            };
+
+            setTimeout(closeSidebar, 250);
+            setTimeout(closeSidebar, 750);
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 @st.cache_data(ttl=900)
@@ -627,6 +668,7 @@ if run_button:
     st.session_state.history_by_ticker = history_by_ticker
     st.session_state.summaries_by_ticker = summaries_by_ticker
     st.session_state.errors = errors
+    close_mobile_sidebar()
 
 if st.session_state.results:
     st.subheader("Stop Results")
