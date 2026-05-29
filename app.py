@@ -38,6 +38,9 @@ ETF_KEYWORDS = [
     "Direxion",
 ]
 
+MIN_HISTORY_BUFFER = 5
+PRICE_COLUMNS = ["Open", "High", "Low", "Close"]
+
 
 # =========================
 # Helpers
@@ -108,25 +111,34 @@ def score_to_regime(score: float) -> str:
 
 @st.cache_data(ttl=900)
 def download_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
-    df = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
+    periods = list(dict.fromkeys([period, "2y", "5y"]))
 
-    if df.empty:
-        return pd.DataFrame()
+    for candidate_period in periods:
+        df = yf.download(
+            ticker,
+            period=candidate_period,
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
+        if df.empty:
+            continue
 
-    required = ["Open", "High", "Low", "Close", "Volume"]
-    df = df[[col for col in required if col in df.columns]].dropna()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] for col in df.columns]
 
-    return df
+        missing_price_columns = [col for col in PRICE_COLUMNS if col not in df.columns]
+        if missing_price_columns:
+            continue
+
+        available_columns = PRICE_COLUMNS + [col for col in ["Volume"] if col in df.columns]
+        cleaned = df[available_columns].dropna(subset=PRICE_COLUMNS)
+        if not cleaned.empty:
+            return cleaned
+
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
@@ -145,9 +157,13 @@ def calculate_volatility_indicators(
     use_vix: bool = True,
 ) -> Tuple[pd.DataFrame, dict]:
     df = download_price_history(ticker, period="1y")
+    min_required_rows = max(atr_window, regime_window, bb_window) + MIN_HISTORY_BUFFER
 
-    if df.empty or len(df) < max(atr_window, regime_window, bb_window) + 5:
-        raise ValueError(f"Not enough data found for {ticker}.")
+    if df.empty or len(df) < min_required_rows:
+        raise ValueError(
+            f"Not enough price history found for {ticker}. "
+            f"Need at least {min_required_rows} usable daily bars; got {len(df)}."
+        )
 
     df = df.copy()
 
@@ -400,6 +416,20 @@ st.set_page_config(
 st.title("ATR Stop Calculator")
 st.caption("Regime-aware ATR stop-loss calculator for stocks and ETFs.")
 
+with st.expander("How this calculator works", expanded=False):
+    st.markdown(
+        """
+        This app estimates a stop-loss price by multiplying a ticker's Average True Range (ATR)
+        by a strategy-specific multiplier. Wider stops are used for longer-horizon strategies
+        and higher-volatility regimes.
+
+        The volatility regime combines three signals: the ticker's ATR ratio, Bollinger Band
+        width ratio, and an optional VIX macro overlay. The chart compares the ticker close
+        against the calculated stop price over time so you can see how much room the stop gives
+        the trade.
+        """
+    )
+
 with st.sidebar:
     st.header("Inputs")
 
@@ -414,17 +444,52 @@ with st.sidebar:
         options=["day", "swing", "trend", "position"],
         index=2,
         format_func=lambda x: STRATEGY_LABELS[x],
+        help=(
+            "Controls the default ATR multiplier. Shorter-term trades use tighter stops; "
+            "longer-term trades use wider stops."
+        ),
     )
 
-    direction = st.radio("Direction", options=["long", "short"], horizontal=True)
+    direction = st.radio(
+        "Direction",
+        options=["long", "short"],
+        horizontal=True,
+        help="Long stops are below the entry price. Short stops are above the entry price.",
+    )
 
     st.divider()
 
     st.subheader("Indicator settings")
-    atr_window = st.number_input("ATR window", min_value=5, max_value=100, value=14, step=1)
-    regime_window = st.number_input("Regime lookback window", min_value=20, max_value=252, value=50, step=5)
-    bb_window = st.number_input("Bollinger window", min_value=10, max_value=100, value=20, step=1)
-    use_vix = st.checkbox("Use VIX macro overlay", value=True)
+    st.caption("These settings control how volatility is measured from daily price history.")
+    atr_window = st.number_input(
+        "ATR window",
+        min_value=5,
+        max_value=100,
+        value=14,
+        step=1,
+        help="Number of daily bars used for Average True Range. Higher values smooth the ATR.",
+    )
+    regime_window = st.number_input(
+        "Regime lookback window",
+        min_value=20,
+        max_value=252,
+        value=50,
+        step=5,
+        help="Lookback used to compare current ATR and Bollinger width against their recent averages.",
+    )
+    bb_window = st.number_input(
+        "Bollinger window",
+        min_value=10,
+        max_value=100,
+        value=20,
+        step=1,
+        help="Window used to calculate Bollinger Band width as a second volatility signal.",
+    )
+    use_vix = st.checkbox(
+        "Use VIX macro overlay",
+        value=True,
+        help="Includes VIX volatility regime as a broad market risk signal.",
+    )
 
     st.divider()
 
@@ -433,10 +498,15 @@ with st.sidebar:
         "Volatility regime override",
         options=["Auto", "Low", "Normal", "High"],
         index=0,
+        help="Use Auto for the calculated regime, or force a Low/Normal/High regime manually.",
     )
     override_regime = None if regime_override_choice == "Auto" else regime_override_choice
 
-    use_custom_multiplier = st.checkbox("Use custom ATR multiplier", value=False)
+    use_custom_multiplier = st.checkbox(
+        "Use custom ATR multiplier",
+        value=False,
+        help="Override the strategy/regime table with one multiplier for every ticker.",
+    )
     custom_multiplier = None
     if use_custom_multiplier:
         custom_multiplier = st.number_input(
@@ -445,17 +515,35 @@ with st.sidebar:
             max_value=10.0,
             value=2.5,
             step=0.25,
+            help="Stop distance equals ATR multiplied by this value.",
         )
 
     st.divider()
 
     st.subheader("Optional position sizing")
-    enable_position_sizing = st.checkbox("Calculate position size", value=False)
+    enable_position_sizing = st.checkbox(
+        "Calculate position size",
+        value=False,
+        help="Estimate shares from account size, risk per trade, and stop distance.",
+    )
     account_size = risk_pct = max_position_pct = None
 
     if enable_position_sizing:
-        account_size = st.number_input("Account size ($)", min_value=100.0, value=100000.0, step=1000.0)
-        risk_pct = st.number_input("Risk per trade (%)", min_value=0.05, max_value=10.0, value=1.0, step=0.05)
+        account_size = st.number_input(
+            "Account size ($)",
+            min_value=100.0,
+            value=100000.0,
+            step=1000.0,
+            help="Total account value used to estimate dollars at risk.",
+        )
+        risk_pct = st.number_input(
+            "Risk per trade (%)",
+            min_value=0.05,
+            max_value=10.0,
+            value=1.0,
+            step=0.05,
+            help="Percent of account value to risk if the stop is hit.",
+        )
         max_position_pct = st.number_input(
             "Max position size (% of account)",
             min_value=0.0,
@@ -471,10 +559,14 @@ with st.sidebar:
 
 
 st.subheader("ATR Multiplier Table")
+st.caption(
+    "The app uses this table unless you choose a custom ATR multiplier. "
+    "Higher multipliers create wider stops."
+)
 
 multiplier_table = pd.DataFrame(ATR_MULTIPLIERS).T
 multiplier_table.index = [STRATEGY_LABELS[idx] for idx in multiplier_table.index]
-st.dataframe(multiplier_table, use_container_width=True)
+st.dataframe(multiplier_table, width="stretch")
 
 
 for key, initial_value in {
@@ -538,8 +630,12 @@ if run_button:
 
 if st.session_state.results:
     st.subheader("Stop Results")
+    st.caption(
+        "Entry Price is the latest close. Stop Distance is ATR times the selected multiplier. "
+        "Stop Price is Entry Price minus Stop Distance for longs, or plus Stop Distance for shorts."
+    )
     result_df = pd.DataFrame(st.session_state.results)
-    st.dataframe(result_df, use_container_width=True)
+    st.dataframe(result_df, width="stretch")
 
     csv = result_df.to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -557,22 +653,47 @@ if st.session_state.results:
         "View chart/details for ticker",
         options=available_tickers,
         key="selected_ticker",
+        help="Switch between the tickers from the latest calculation without rerunning the data fetch.",
     )
 
     hist = st.session_state.history_by_ticker[selected].copy()
     summary = st.session_state.summaries_by_ticker[selected]
 
     st.subheader(f"{selected} Close vs Stop Price")
+    st.caption(
+        "The stop-price line is recalculated for each historical day using that day's close, ATR, "
+        "direction, and selected multiplier/regime settings."
+    )
     chart_df = hist[["Close", "Stop Price"]].dropna()
     st.line_chart(chart_df)
 
     detail_cols = st.columns(4)
-    detail_cols[0].metric("Latest Close", f"${summary['entry_price']:.2f}")
-    detail_cols[1].metric("ATR", f"${summary['atr']:.2f}")
-    detail_cols[2].metric("Combined Regime", summary["volatility_regime"])
-    detail_cols[3].metric("Regime Score", f"{summary['regime_score']:.2f}")
+    detail_cols[0].metric(
+        "Latest Close",
+        f"${summary['entry_price']:.2f}",
+        help="Most recent close from Yahoo Finance daily data.",
+    )
+    detail_cols[1].metric(
+        "ATR",
+        f"${summary['atr']:.2f}",
+        help="Average True Range, a dollar estimate of recent daily price movement.",
+    )
+    detail_cols[2].metric(
+        "Combined Regime",
+        summary["volatility_regime"],
+        help="Low, Normal, or High volatility classification from the combined regime score.",
+    )
+    detail_cols[3].metric(
+        "Regime Score",
+        f"{summary['regime_score']:.2f}",
+        help="Average of ATR, Bollinger width, and VIX regime scores. Higher means more volatility.",
+    )
 
     st.subheader(f"{selected} Regime Details")
+    st.caption(
+        "Ratios compare the current reading with its recent average. Low is below 0.75, "
+        "High is above 1.50, and Normal is between those levels."
+    )
     regime_detail = pd.DataFrame(
         [
             {
@@ -592,11 +713,12 @@ if st.session_state.results:
             },
         ]
     )
-    st.dataframe(regime_detail, use_container_width=True)
+    st.dataframe(regime_detail, width="stretch")
 
 if st.session_state.errors:
     st.subheader("Errors")
-    st.dataframe(pd.DataFrame(st.session_state.errors), use_container_width=True)
+    st.caption("These tickers could not be calculated from the available Yahoo Finance data.")
+    st.dataframe(pd.DataFrame(st.session_state.errors), width="stretch")
 
 if not run_button and not st.session_state.results:
     st.info("Enter tickers and click **Calculate Stops**.")
