@@ -119,24 +119,53 @@ def close_mobile_sidebar() -> None:
                 const parentDoc = window.parent.document;
                 const isMobile = window.parent.innerWidth <= 768;
                 if (!isMobile) {
-                    return;
+                    return "not-mobile";
                 }
 
-                const buttons = Array.from(parentDoc.querySelectorAll("button"));
-                for (const button of buttons) {
-                    const label = `${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""}`;
-                    const isCloseControl = /close sidebar|collapse sidebar/i.test(label);
-                    if (isCloseControl && button.offsetParent !== null) {
-                        button.click();
-                        return true;
+                const sidebar = parentDoc.querySelector('[data-testid="stSidebar"]');
+                if (!sidebar) {
+                    return "no-sidebar";
+                }
+
+                const sidebarRect = sidebar.getBoundingClientRect();
+                const sidebarStyle = window.parent.getComputedStyle(sidebar);
+                const sidebarIsOpen =
+                    sidebarRect.width > 0 &&
+                    sidebarRect.right > 0 &&
+                    sidebarRect.left < window.parent.innerWidth &&
+                    sidebarStyle.display !== "none" &&
+                    sidebarStyle.visibility !== "hidden";
+
+                if (!sidebarIsOpen) {
+                    return "already-closed";
+                }
+
+                const explicitControls = Array.from(
+                    parentDoc.querySelectorAll(
+                        '[data-testid="stSidebarCollapseButton"], ' +
+                        '[data-testid="stSidebarCollapseButton"] button, ' +
+                        'button[aria-label*="sidebar" i], ' +
+                        'button[title*="sidebar" i]'
+                    )
+                );
+                const sidebarTopButtons = Array.from(sidebar.querySelectorAll("button")).filter((button) => {
+                    const rect = button.getBoundingClientRect();
+                    return rect.top <= sidebarRect.top + 90;
+                });
+
+                for (const control of [...explicitControls, ...sidebarTopButtons]) {
+                    const rect = control.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        control.click();
+                        return "clicked";
                     }
                 }
 
-                return false;
+                return "not-found";
             };
 
             setTimeout(() => {
-                if (!closeSidebar()) {
+                if (closeSidebar() === "not-found") {
                     setTimeout(closeSidebar, 500);
                 }
             }, 250);
