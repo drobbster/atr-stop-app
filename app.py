@@ -712,9 +712,25 @@ if st.session_state.results:
     st.caption(
         "Entry Price is the latest close. Stop Distance is ATR times the selected multiplier. "
         "Stop Price is Entry Price minus Stop Distance for longs, or plus Stop Distance for shorts. "
+        "Risk % to Stop answers: how far can this position move against me before my stop is hit? "
         "Trend Strength and Long-Term Trend show percent above or below the 50-day and 200-day "
         "moving averages."
     )
+    with st.expander("What does Risk % to Stop mean?", expanded=False):
+        st.markdown(
+            """
+            **Risk % to Stop** answers: _How far can this position move against me before my stop
+            is hit?_
+
+            For a long trade, it is the percentage drop from entry to stop. For a short trade,
+            it is the percentage rise from entry to stop. A larger value means the position has
+            more room to move before the stop is hit, but each share carries more price risk.
+
+            Example: if entry is `$100` and the stop is `$92`, the stop is `$8` away, so
+            Risk % to Stop is `8%`. With position sizing enabled, the app uses that stop distance
+            to estimate how many shares fit your selected risk budget.
+            """
+        )
     result_df = pd.DataFrame(st.session_state.results)
     st.dataframe(result_df, width="stretch")
 
@@ -739,6 +755,7 @@ if st.session_state.results:
 
     hist = st.session_state.history_by_ticker[selected].copy()
     summary = st.session_state.summaries_by_ticker[selected]
+    selected_result = result_df[result_df["Ticker"] == selected].iloc[0]
 
     st.subheader(f"{selected} Close, Moving Averages, and Stop Price")
     st.caption(
@@ -781,6 +798,23 @@ if st.session_state.results:
         "Long-Term Trend",
         f"{summary['long_term_trend']:.2f}%" if not pd.isna(summary["long_term_trend"]) else "N/A",
         help="Current close compared with the 200-day moving average.",
+    )
+
+    risk_cols = st.columns(3)
+    risk_cols[0].metric(
+        "Stop Price",
+        f"${selected_result['Stop Price']:.2f}",
+        help="Calculated stop price for the selected ticker.",
+    )
+    risk_cols[1].metric(
+        "Stop Distance",
+        f"${selected_result['Stop Distance']:.2f}",
+        help="Dollar distance between entry price and stop price.",
+    )
+    risk_cols[2].metric(
+        "Risk % to Stop",
+        f"{selected_result['Risk % to Stop']:.2f}%",
+        help="How far this position can move against you before the stop is hit.",
     )
 
     st.subheader(f"{selected} Regime Details")
