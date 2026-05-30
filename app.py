@@ -1,6 +1,7 @@
 import math
 from typing import Dict, List, Optional, Tuple
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -212,7 +213,7 @@ def calculate_volatility_indicators(
     use_vix: bool = True,
 ) -> Tuple[pd.DataFrame, dict]:
     df = download_price_history(ticker, period="1y")
-    min_required_rows = max(atr_window, regime_window, bb_window) + MIN_HISTORY_BUFFER
+    min_required_rows = max(atr_window, regime_window, bb_window, 200) + MIN_HISTORY_BUFFER
 
     if df.empty or len(df) < min_required_rows:
         raise ValueError(
@@ -221,6 +222,12 @@ def calculate_volatility_indicators(
         )
 
     df = df.copy()
+
+    # Trend context
+    df["MA50"] = df["Close"].rolling(50).mean()
+    df["MA200"] = df["Close"].rolling(200).mean()
+    df["Trend Strength"] = ((df["Close"] - df["MA50"]) / df["MA50"]) * 100
+    df["Long-Term Trend"] = ((df["Close"] - df["MA200"]) / df["MA200"]) * 100
 
     # ATR regime
     df["TR"] = true_range(df)
@@ -273,6 +280,14 @@ def calculate_volatility_indicators(
         "ticker": ticker,
         "entry_price": float(latest["Close"]),
         "atr": float(latest["ATR"]),
+        "ma50": float(latest["MA50"]) if not pd.isna(latest["MA50"]) else np.nan,
+        "ma200": float(latest["MA200"]) if not pd.isna(latest["MA200"]) else np.nan,
+        "trend_strength": float(latest["Trend Strength"])
+        if not pd.isna(latest["Trend Strength"])
+        else np.nan,
+        "long_term_trend": float(latest["Long-Term Trend"])
+        if not pd.isna(latest["Long-Term Trend"])
+        else np.nan,
         "atr_ratio": float(latest["ATR_Ratio"]) if not pd.isna(latest["ATR_Ratio"]) else np.nan,
         "atr_regime": str(latest["ATR_Regime"]),
         "bb_ratio": float(latest["BB_Ratio"]) if not pd.isna(latest["BB_Ratio"]) else np.nan,
@@ -448,6 +463,14 @@ def generate_stop_for_ticker(
     stop.update(
         {
             "Data Date": pd.to_datetime(vol_summary["date"]).strftime("%Y-%m-%d"),
+            "MA50": round(vol_summary["ma50"], 2) if not pd.isna(vol_summary["ma50"]) else np.nan,
+            "MA200": round(vol_summary["ma200"], 2) if not pd.isna(vol_summary["ma200"]) else np.nan,
+            "Trend Strength": round(vol_summary["trend_strength"], 2)
+            if not pd.isna(vol_summary["trend_strength"])
+            else np.nan,
+            "Long-Term Trend": round(vol_summary["long_term_trend"], 2)
+            if not pd.isna(vol_summary["long_term_trend"])
+            else np.nan,
             "ATR Regime": vol_summary["atr_regime"],
             "BB Regime": vol_summary["bb_regime"],
             "VIX Regime": vol_summary["vix_regime"],
@@ -479,9 +502,10 @@ with st.expander("How this calculator works", expanded=False):
         and higher-volatility regimes.
 
         The volatility regime combines three signals: the ticker's ATR ratio, Bollinger Band
-        width ratio, and an optional VIX macro overlay. The chart compares the ticker close
-        against the calculated stop price over time so you can see how much room the stop gives
-        the trade.
+        width ratio, and an optional VIX macro overlay. Trend Strength compares the close with
+        the 50-day moving average, and Long-Term Trend compares it with the 200-day moving average.
+        The chart compares close, MA50, MA200, and stop price so you can see trend context and
+        how much room the stop gives the trade.
         """
     )
 
@@ -688,8 +712,26 @@ if st.session_state.results:
     st.subheader("Stop Results")
     st.caption(
         "Entry Price is the latest close. Stop Distance is ATR times the selected multiplier. "
-        "Stop Price is Entry Price minus Stop Distance for longs, or plus Stop Distance for shorts."
+        "Stop Price is Entry Price minus Stop Distance for longs, or plus Stop Distance for shorts. "
+        "Risk % to Stop answers: how far can this position move against me before my stop is hit? "
+        "Trend Strength and Long-Term Trend show percent above or below the 50-day and 200-day "
+        "moving averages."
     )
+    with st.expander("What does Risk % to Stop mean?", expanded=False):
+        st.markdown(
+            """
+            **Risk % to Stop** answers: _How far can this position move against me before my stop
+            is hit?_
+
+            For a long trade, it is the percentage drop from entry to stop. For a short trade,
+            it is the percentage rise from entry to stop. A larger value means the position has
+            more room to move before the stop is hit, but each share carries more price risk.
+
+            Example: if entry is `$100` and the stop is `$92`, the stop is `$8` away, so
+            Risk % to Stop is `8%`. With position sizing enabled, the app uses that stop distance
+            to estimate how many shares fit your selected risk budget.
+            """
+        )
     result_df = pd.DataFrame(st.session_state.results)
     st.dataframe(result_df, width="stretch")
 
@@ -714,14 +756,31 @@ if st.session_state.results:
 
     hist = st.session_state.history_by_ticker[selected].copy()
     summary = st.session_state.summaries_by_ticker[selected]
+    selected_result = result_df[result_df["Ticker"] == selected].iloc[0]
 
-    st.subheader(f"{selected} Close vs Stop Price")
+    st.subheader(f"{selected} Close, Moving Averages, and Stop Price")
     st.caption(
-        "The stop-price line is recalculated for each historical day using that day's close, ATR, "
-        "direction, and selected multiplier/regime settings."
+        "MA50 and MA200 show intermediate and long-term trend context. The stop-price line is "
+        "recalculated for each historical day using that day's close, ATR, direction, and selected "
+        "multiplier/regime settings."
     )
-    chart_df = hist[["Close", "Stop Price"]].dropna()
-    st.line_chart(chart_df)
+    chart_df = hist[["Close", "MA50", "MA200", "Stop Price"]].dropna(subset=["Close", "Stop Price"])
+    chart_data = (
+        chart_df.reset_index(names="Date")
+        .melt(id_vars="Date", var_name="Series", value_name="Price")
+        .dropna(subset=["Price"])
+    )
+    price_chart = (
+        alt.Chart(chart_data)
+        .mark_line()
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Price:Q", title="Price"),
+            color=alt.Color("Series:N", title="Series"),
+        )
+        .properties(height=360)
+    )
+    st.altair_chart(price_chart, width="stretch")
 
     detail_cols = st.columns(4)
     detail_cols[0].metric(
@@ -743,6 +802,35 @@ if st.session_state.results:
         "Regime Score",
         f"{summary['regime_score']:.2f}",
         help="Average of ATR, Bollinger width, and VIX regime scores. Higher means more volatility.",
+    )
+
+    trend_cols = st.columns(2)
+    trend_cols[0].metric(
+        "Trend Strength",
+        f"{summary['trend_strength']:.2f}%" if not pd.isna(summary["trend_strength"]) else "N/A",
+        help="Current close compared with the 50-day moving average.",
+    )
+    trend_cols[1].metric(
+        "Long-Term Trend",
+        f"{summary['long_term_trend']:.2f}%" if not pd.isna(summary["long_term_trend"]) else "N/A",
+        help="Current close compared with the 200-day moving average.",
+    )
+
+    risk_cols = st.columns(3)
+    risk_cols[0].metric(
+        "Stop Price",
+        f"${selected_result['Stop Price']:.2f}",
+        help="Calculated stop price for the selected ticker.",
+    )
+    risk_cols[1].metric(
+        "Stop Distance",
+        f"${selected_result['Stop Distance']:.2f}",
+        help="Dollar distance between entry price and stop price.",
+    )
+    risk_cols[2].metric(
+        "Risk % to Stop",
+        f"{selected_result['Risk % to Stop']:.2f}%",
+        help="How far this position can move against you before the stop is hit.",
     )
 
     st.subheader(f"{selected} Regime Details")
