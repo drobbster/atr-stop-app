@@ -50,7 +50,7 @@ The selected ticker chart shows:
 - MA200
 - Stop price
 
-Tooltips are disabled to avoid sticky mobile browser overlays.
+The chart tooltip shows the selected date's close, MA50, MA200, stop price, and risk % to stop.
 
 ### Optional Position Sizing
 

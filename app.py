@@ -764,10 +764,29 @@ if st.session_state.results:
         "recalculated for each historical day using that day's close, ATR, direction, and selected "
         "multiplier/regime settings."
     )
-    chart_df = hist[["Close", "MA50", "MA200", "Stop Price"]].dropna(subset=["Close", "Stop Price"])
+    chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
+        subset=["Close", "Stop Price"]
+    )
+    chart_df["Risk % to Stop"] = (chart_df["Stop Distance"] / chart_df["Close"]) * 100
+    chart_df["Tooltip Close"] = chart_df["Close"]
+    chart_df["Tooltip MA50"] = chart_df["MA50"]
+    chart_df["Tooltip MA200"] = chart_df["MA200"]
+    chart_df["Tooltip Stop Price"] = chart_df["Stop Price"]
     chart_data = (
         chart_df.reset_index(names="Date")
-        .melt(id_vars="Date", var_name="Series", value_name="Price")
+        .melt(
+            id_vars=[
+                "Date",
+                "Tooltip Close",
+                "Tooltip MA50",
+                "Tooltip MA200",
+                "Tooltip Stop Price",
+                "Risk % to Stop",
+            ],
+            value_vars=["Close", "MA50", "MA200", "Stop Price"],
+            var_name="Series",
+            value_name="Price",
+        )
         .dropna(subset=["Price"])
     )
     price_chart = (
@@ -777,6 +796,14 @@ if st.session_state.results:
             x=alt.X("Date:T", title="Date"),
             y=alt.Y("Price:Q", title="Price"),
             color=alt.Color("Series:N", title="Series"),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Tooltip Close:Q", title="Close", format=",.2f"),
+                alt.Tooltip("Tooltip MA50:Q", title="MA50", format=",.2f"),
+                alt.Tooltip("Tooltip MA200:Q", title="MA200", format=",.2f"),
+                alt.Tooltip("Tooltip Stop Price:Q", title="Stop Price", format=",.2f"),
+                alt.Tooltip("Risk % to Stop:Q", title="Risk % to Stop", format=".2f"),
+            ],
         )
         .properties(height=360)
     )
