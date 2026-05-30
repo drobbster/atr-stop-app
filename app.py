@@ -1,6 +1,7 @@
 import math
 from typing import Dict, List, Optional, Tuple
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -764,7 +765,22 @@ if st.session_state.results:
         "multiplier/regime settings."
     )
     chart_df = hist[["Close", "MA50", "MA200", "Stop Price"]].dropna(subset=["Close", "Stop Price"])
-    st.line_chart(chart_df)
+    chart_data = (
+        chart_df.reset_index(names="Date")
+        .melt(id_vars="Date", var_name="Series", value_name="Price")
+        .dropna(subset=["Price"])
+    )
+    price_chart = (
+        alt.Chart(chart_data)
+        .mark_line()
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Price:Q", title="Price"),
+            color=alt.Color("Series:N", title="Series"),
+        )
+        .properties(height=360)
+    )
+    st.altair_chart(price_chart, width="stretch")
 
     detail_cols = st.columns(4)
     detail_cols[0].metric(
