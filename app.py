@@ -861,8 +861,30 @@ if st.session_state.results:
     trend_cols[2].metric(
         "VWAP Strength",
         f"{summary['vwap_strength']:.2f}%" if not pd.isna(summary["vwap_strength"]) else "N/A",
-        help="Current close compared with the 50-day volume-weighted average price.",
+        help=(
+            "Current close compared with the 50-day volume-weighted average price. "
+            "Positive means price is above the recent volume-weighted cost basis."
+        ),
     )
+    with st.expander("How to use the trend and VWAP metrics", expanded=False):
+        st.markdown(
+            """
+            **Trend Strength** shows whether price is above or below the 50-day moving average.
+            **Long-Term Trend** does the same against the 200-day moving average. Positive values
+            confirm price is above those trend lines; very large positive values can also mean the
+            move is extended.
+
+            **VWAP Strength** compares price with the 50-day volume-weighted average price, which
+            is a rough view of recent volume-weighted cost basis. If price is above both MA50 and
+            VWAP50, trend and recent buyer cost basis are confirming each other. If price is above
+            MA50 but below VWAP50, the simple trend may look constructive, but recent high-volume
+            buyers may still be underwater, which can create overhead supply.
+
+            Use these as context with ATR and Risk % to Stop: a strong trend with a reasonable
+            stop distance is usually cleaner than a strong-looking trend that is very extended or
+            sitting below its volume-weighted cost basis.
+            """
+        )
 
     risk_cols = st.columns(3)
     risk_cols[0].metric(
