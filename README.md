@@ -44,6 +44,16 @@ Positive trend values mean the latest close is above the moving average. Negativ
 it is below the moving average. Positive VWAP strength means price is above the recent
 volume-weighted cost basis.
 
+Use these metrics as context:
+
+- Price above both `MA50` and `VWAP50` suggests the simple trend and recent volume-weighted cost
+  basis are confirming each other.
+- Price above `MA50` but below `VWAP50` can mean the trend looks constructive, but recent
+  high-volume buyers may still be underwater.
+- Very high positive values can mean strength, but they can also mean the move is extended.
+- Compare these metrics with ATR and risk % to stop before deciding whether the stop distance
+  gives the trade enough room.
+
 ### Chart
 
 The selected ticker chart shows:
