@@ -35,11 +35,14 @@ The app also calculates simple trend context:
 
 - `MA50`: 50-day moving average
 - `MA200`: 200-day moving average
+- `VWAP50`: 50-day volume-weighted average price
 - `Trend Strength`: current close vs. 50-day moving average
 - `Long-Term Trend`: current close vs. 200-day moving average
+- `VWAP Strength`: current close vs. 50-day volume-weighted average price
 
 Positive trend values mean the latest close is above the moving average. Negative values mean
-it is below the moving average.
+it is below the moving average. Positive VWAP strength means price is above the recent
+volume-weighted cost basis.
 
 ### Chart
 
@@ -72,6 +75,7 @@ trade recommendations.
 - `Risk % to Stop`: how far the position can move against you before the stop is hit.
 - `Trend Strength`: percent above or below the 50-day moving average.
 - `Long-Term Trend`: percent above or below the 200-day moving average.
+- `VWAP Strength`: percent above or below the 50-day volume-weighted average price.
 
 ## Disclaimer
 

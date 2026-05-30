@@ -228,6 +228,14 @@ def calculate_volatility_indicators(
     df["MA200"] = df["Close"].rolling(200).mean()
     df["Trend Strength"] = ((df["Close"] - df["MA50"]) / df["MA50"]) * 100
     df["Long-Term Trend"] = ((df["Close"] - df["MA200"]) / df["MA200"]) * 100
+    if "Volume" in df.columns:
+        rolling_volume = df["Volume"].rolling(50).sum()
+        rolling_price_volume = (df["Close"] * df["Volume"]).rolling(50).sum()
+        df["VWAP50"] = rolling_price_volume / rolling_volume.replace(0, np.nan)
+        df["VWAP Strength"] = ((df["Close"] - df["VWAP50"]) / df["VWAP50"]) * 100
+    else:
+        df["VWAP50"] = np.nan
+        df["VWAP Strength"] = np.nan
 
     # ATR regime
     df["TR"] = true_range(df)
@@ -282,11 +290,15 @@ def calculate_volatility_indicators(
         "atr": float(latest["ATR"]),
         "ma50": float(latest["MA50"]) if not pd.isna(latest["MA50"]) else np.nan,
         "ma200": float(latest["MA200"]) if not pd.isna(latest["MA200"]) else np.nan,
+        "vwap50": float(latest["VWAP50"]) if not pd.isna(latest["VWAP50"]) else np.nan,
         "trend_strength": float(latest["Trend Strength"])
         if not pd.isna(latest["Trend Strength"])
         else np.nan,
         "long_term_trend": float(latest["Long-Term Trend"])
         if not pd.isna(latest["Long-Term Trend"])
+        else np.nan,
+        "vwap_strength": float(latest["VWAP Strength"])
+        if not pd.isna(latest["VWAP Strength"])
         else np.nan,
         "atr_ratio": float(latest["ATR_Ratio"]) if not pd.isna(latest["ATR_Ratio"]) else np.nan,
         "atr_regime": str(latest["ATR_Regime"]),
@@ -465,11 +477,15 @@ def generate_stop_for_ticker(
             "Data Date": pd.to_datetime(vol_summary["date"]).strftime("%Y-%m-%d"),
             "MA50": round(vol_summary["ma50"], 2) if not pd.isna(vol_summary["ma50"]) else np.nan,
             "MA200": round(vol_summary["ma200"], 2) if not pd.isna(vol_summary["ma200"]) else np.nan,
+            "VWAP50": round(vol_summary["vwap50"], 2) if not pd.isna(vol_summary["vwap50"]) else np.nan,
             "Trend Strength": round(vol_summary["trend_strength"], 2)
             if not pd.isna(vol_summary["trend_strength"])
             else np.nan,
             "Long-Term Trend": round(vol_summary["long_term_trend"], 2)
             if not pd.isna(vol_summary["long_term_trend"])
+            else np.nan,
+            "VWAP Strength": round(vol_summary["vwap_strength"], 2)
+            if not pd.isna(vol_summary["vwap_strength"])
             else np.nan,
             "ATR Regime": vol_summary["atr_regime"],
             "BB Regime": vol_summary["bb_regime"],
@@ -714,8 +730,8 @@ if st.session_state.results:
         "Entry Price is the latest close. Stop Distance is ATR times the selected multiplier. "
         "Stop Price is Entry Price minus Stop Distance for longs, or plus Stop Distance for shorts. "
         "Risk % to Stop answers: how far can this position move against me before my stop is hit? "
-        "Trend Strength and Long-Term Trend show percent above or below the 50-day and 200-day "
-        "moving averages."
+        "Trend Strength, Long-Term Trend, and VWAP Strength show percent above or below MA50, "
+        "MA200, and VWAP50."
     )
     with st.expander("What does Risk % to Stop mean?", expanded=False):
         st.markdown(
@@ -831,7 +847,7 @@ if st.session_state.results:
         help="Average of ATR, Bollinger width, and VIX regime scores. Higher means more volatility.",
     )
 
-    trend_cols = st.columns(2)
+    trend_cols = st.columns(3)
     trend_cols[0].metric(
         "Trend Strength",
         f"{summary['trend_strength']:.2f}%" if not pd.isna(summary["trend_strength"]) else "N/A",
@@ -841,6 +857,11 @@ if st.session_state.results:
         "Long-Term Trend",
         f"{summary['long_term_trend']:.2f}%" if not pd.isna(summary["long_term_trend"]) else "N/A",
         help="Current close compared with the 200-day moving average.",
+    )
+    trend_cols[2].metric(
+        "VWAP Strength",
+        f"{summary['vwap_strength']:.2f}%" if not pd.isna(summary["vwap_strength"]) else "N/A",
+        help="Current close compared with the 50-day volume-weighted average price.",
     )
 
     risk_cols = st.columns(3)
