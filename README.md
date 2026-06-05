@@ -54,6 +54,39 @@ Use these metrics as context:
 - Compare these metrics with ATR and risk % to stop before deciding whether the stop distance
   gives the trade enough room.
 
+### Entry Setup (Entry Panel)
+
+While the stop logic answers *where to exit*, the Entry Panel adds context for *when to
+enter*, so a full plan reads as `entry → stop → target → reward:risk → size`. For the
+selected ticker it shows:
+
+- **Entry Score (0-100)** and **grade (A/B/C)**: a composite, explainable score that
+  weights direction-aware sub-scores — trend alignment, location vs. support (in ATR),
+  cost basis, the RSI trigger, relative volume, and relative strength vs. a benchmark.
+  Each factor scores 0-100 and is weighted per strategy; factors with missing data are
+  excluded and the rest are renormalized. The grade is derived from the score
+  (A ≥ 75, B ≥ 55, else C).
+- **Trend alignment**: whether `Close`, `MA50`, and `MA200` are stacked in the trade's
+  direction.
+- **Location state**: distance from `MA50` measured in ATR units, classified as
+  `At Support` / `Near` / `Neutral` / `Extended`. A shallow pullback toward rising
+  support scores better than chasing an extended move.
+- **RSI trigger**: a Wilder RSI(14) state that favors a pullback resetting back up (for
+  longs) rather than a chase at overbought.
+- **Relative volume** and **relative strength** vs. the selected benchmark (`SPY` by
+  default) as confirmation and leadership signals.
+- **Planned entry**: model the plan at any entry price. The stop *distance* stays fixed
+  (it is volatility-based), while the stop price, risk %, and shares update.
+- **Target & Reward:Risk**: a target from the nearest recent swing level (structure) or
+  a fixed ATR multiple, and the resulting reward:risk estimate.
+- **Signal replay (backtest)**: every historical entry trigger is walked forward with
+  the same ATR stop and an ATR-multiple target to estimate win rate, average R, and
+  expectancy. This is a look-ahead-safe what-if for calibration only — it ignores
+  slippage, intrabar gaps, and overlapping positions, so treat it as rough context.
+
+All entry thresholds and weights are tuned per trading strategy. This is educational
+setup context, not a trade recommendation.
+
 ### Chart
 
 The selected ticker chart shows:
@@ -62,6 +95,8 @@ The selected ticker chart shows:
 - MA50
 - MA200
 - Stop price
+- Optional entry-trigger markers (where trend, location, and the RSI trigger all fired
+  for the selected direction)
 
 The chart tooltip shows the selected date's close, MA50, MA200, stop price, and risk % to stop.
 
@@ -86,6 +121,13 @@ trade recommendations.
 - `Trend Strength`: percent above or below the 50-day moving average.
 - `Long-Term Trend`: percent above or below the 200-day moving average.
 - `VWAP Strength`: percent above or below the 50-day volume-weighted average price.
+- `Entry Score`: composite 0-100 entry-quality score from the weighted Entry Panel factors.
+- `Setup Grade`: A/B/C grade derived from the Entry Score.
+- `Location`: distance from `MA50` in ATR units, bucketed (At Support / Near / Neutral / Extended).
+- `Target`: estimated target price (nearest swing level or ATR multiple).
+- `Reward:Risk`: distance to target divided by stop distance, expressed in R.
+- `Signal Win %` / `Signal Avg R`: historical hit-rate and average R from replaying the
+  ticker's entry triggers.
 
 ## Disclaimer
 
