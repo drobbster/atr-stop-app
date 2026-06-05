@@ -60,10 +60,12 @@ While the stop logic answers *where to exit*, the Entry Panel adds context for *
 enter*, so a full plan reads as `entry → stop → target → reward:risk → size`. For the
 selected ticker it shows:
 
-- **Setup grade (A/B/C)**: a coarse, explainable quality tag counting how many
-  direction-aware conditions pass — trend alignment, location vs. support (in ATR),
+- **Entry Score (0-100)** and **grade (A/B/C)**: a composite, explainable score that
+  weights direction-aware sub-scores — trend alignment, location vs. support (in ATR),
   cost basis, the RSI trigger, relative volume, and relative strength vs. a benchmark.
-  Conditions with missing data are excluded so they do not unfairly penalize the grade.
+  Each factor scores 0-100 and is weighted per strategy; factors with missing data are
+  excluded and the rest are renormalized. The grade is derived from the score
+  (A ≥ 75, B ≥ 55, else C).
 - **Trend alignment**: whether `Close`, `MA50`, and `MA200` are stacked in the trade's
   direction.
 - **Location state**: distance from `MA50` measured in ATR units, classified as
@@ -77,9 +79,13 @@ selected ticker it shows:
   (it is volatility-based), while the stop price, risk %, and shares update.
 - **Target & Reward:Risk**: a target from the nearest recent swing level (structure) or
   a fixed ATR multiple, and the resulting reward:risk estimate.
+- **Signal replay (backtest)**: every historical entry trigger is walked forward with
+  the same ATR stop and an ATR-multiple target to estimate win rate, average R, and
+  expectancy. This is a look-ahead-safe what-if for calibration only — it ignores
+  slippage, intrabar gaps, and overlapping positions, so treat it as rough context.
 
-All entry thresholds are tuned per trading strategy. This is educational setup context,
-not a trade recommendation.
+All entry thresholds and weights are tuned per trading strategy. This is educational
+setup context, not a trade recommendation.
 
 ### Chart
 
@@ -115,10 +121,13 @@ trade recommendations.
 - `Trend Strength`: percent above or below the 50-day moving average.
 - `Long-Term Trend`: percent above or below the 200-day moving average.
 - `VWAP Strength`: percent above or below the 50-day volume-weighted average price.
-- `Setup Grade`: coarse A/B/C entry-quality tag from the Entry Panel conditions.
+- `Entry Score`: composite 0-100 entry-quality score from the weighted Entry Panel factors.
+- `Setup Grade`: A/B/C grade derived from the Entry Score.
 - `Location`: distance from `MA50` in ATR units, bucketed (At Support / Near / Neutral / Extended).
 - `Target`: estimated target price (nearest swing level or ATR multiple).
 - `Reward:Risk`: distance to target divided by stop distance, expressed in R.
+- `Signal Win %` / `Signal Avg R`: historical hit-rate and average R from replaying the
+  ticker's entry triggers.
 
 ## Disclaimer
 

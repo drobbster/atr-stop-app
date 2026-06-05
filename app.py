@@ -50,6 +50,17 @@ ENTRY_CONFIG: Dict[str, Dict[str, float]] = {
                  "vol_mult": 1.2, "vol_required": False, "rs_lookback": 126},
 }
 
+# Per-strategy weights for the composite 0-100 Entry Score. Each factor contributes a
+# 0..1 sub-score; the weighted average over applicable factors is scaled to 0-100.
+# Weights reflect each strategy's archetype (e.g. trend leans on alignment + relative
+# strength; day/swing lean on the trigger and location).
+ENTRY_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "day": {"trend": 1.0, "location": 2.0, "cost_basis": 1.0, "trigger": 2.0, "volume": 2.0, "rs": 1.0},
+    "swing": {"trend": 1.5, "location": 2.0, "cost_basis": 1.0, "trigger": 2.0, "volume": 1.0, "rs": 1.5},
+    "trend": {"trend": 2.0, "location": 1.5, "cost_basis": 1.0, "trigger": 1.0, "volume": 1.5, "rs": 2.0},
+    "position": {"trend": 2.0, "location": 1.0, "cost_basis": 1.0, "trigger": 1.0, "volume": 0.5, "rs": 2.0},
+}
+
 ETF_KEYWORDS = [
     "ETF",
     "Fund",
@@ -345,9 +356,50 @@ def build_trade_plan(
     }
 
 
+def _trend_subscore(ta: str, is_long: bool) -> float:
+    exact = "Aligned Long" if is_long else "Aligned Short"
+    soft = "Aligned Long*" if is_long else "Aligned Short*"
+    if ta == exact:
+        return 1.0
+    if ta == soft:
+        return 0.6
+    if ta == "Mixed":
+        return 0.3
+    return 0.0
+
+
+def _location_subscore(loc: str) -> float:
+    return {
+        "At Support": 1.0,
+        "Near": 0.8,
+        "Neutral": 0.4,
+        "Below Support": 0.2,
+        "Extended": 0.1,
+    }.get(loc, 0.3)
+
+
+def _trigger_subscore(rsi_state: str, is_long: bool) -> float:
+    if is_long:
+        return {"Resetting Up": 1.0, "Oversold": 0.7, "Neutral": 0.4, "Overbought": 0.1}.get(
+            rsi_state, 0.4
+        )
+    return {"Resetting Down": 1.0, "Overbought": 0.7, "Neutral": 0.4, "Oversold": 0.1}.get(
+        rsi_state, 0.4
+    )
+
+
+def _rs_subscore(rs_read: str) -> Optional[float]:
+    if rs_read in ("N/A", "nan", "None"):
+        return None
+    return {"Leader": 1.0, "Improving Laggard": 0.7, "Cooling Leader": 0.5, "Laggard": 0.2}.get(
+        rs_read, 0.4
+    )
+
+
 def grade_setup(summary: dict, strategy_type: str, direction: str) -> dict:
-    """Build a coarse A/B/C setup grade and its explainable components."""
+    """Compute the composite 0-100 Entry Score, its A/B/C grade, and components."""
     cfg = ENTRY_CONFIG[strategy_type]
+    weights = ENTRY_WEIGHTS[strategy_type]
     is_long = direction.lower() == "long"
     benchmark = summary.get("benchmark", BENCHMARK)
 
@@ -368,58 +420,71 @@ def grade_setup(summary: dict, strategy_type: str, direction: str) -> dict:
     rs_ok = rs_read in ("Leader", "Improving Laggard")
 
     dist = summary.get("dist_ma50_atr")
-    dist_str = (
-        f"{dist:+.1f} ATR vs MA50" if dist is not None and not pd.isna(dist) else "n/a"
-    )
+    dist_str = f"{dist:+.1f} ATR vs MA50" if dist is not None and not pd.isna(dist) else "n/a"
     rsi_val = summary.get("rsi")
     rsi_str = f"{rsi_val:.0f}" if rsi_val is not None and not pd.isna(rsi_val) else "n/a"
     relv = summary.get("rel_volume")
     relv_str = f"{relv:.1f}x avg" if relv is not None and not pd.isna(relv) else "n/a"
     rsret = summary.get("rs_return_rel")
     rsret_str = (
-        f"{rsret:+.1f}% vs {benchmark}"
-        if rsret is not None and not pd.isna(rsret)
-        else ""
+        f"{rsret:+.1f}% vs {benchmark}" if rsret is not None and not pd.isna(rsret) else ""
     )
+
+    # Component sub-scores (None => excluded from the score and renormalized)
+    trend_sub = _trend_subscore(ta, is_long)
+    loc_sub = _location_subscore(loc)
+    cost_sub = None if cb == "N/A" else (1.0 if cb == "Clean" else 0.3)
+    trig_sub = _trigger_subscore(rsi_state, is_long)
+    if relv is None or pd.isna(relv):
+        vol_sub = None
+    else:
+        vol_sub = float(np.clip(relv / cfg["vol_mult"], 0.0, 1.0))
+    rs_sub = _rs_subscore(rs_read)
 
     components = []
 
-    def add(factor, value, applicable, passed, read=None):
-        if read is None:
-            read = "Pass" if passed else "Fail"
+    def add(factor, value, read, weight, sub):
         components.append(
-            {"Factor": factor, "Value": value, "Read": read, "_app": applicable, "_pass": passed}
+            {
+                "Factor": factor,
+                "Value": value,
+                "Read": read,
+                "Weight": weight,
+                "Score": round(sub * 100) if sub is not None else None,
+                "_w": weight,
+                "_sub": sub,
+            }
         )
 
-    add("Trend alignment", ta, True, aligned_ok)
-    add("Location", f"{loc} ({dist_str})", True, loc_ok)
-
-    if cb == "N/A":
-        add("Cost basis", "N/A", False, False, read="N/A")
+    add("Trend alignment", ta, "Pass" if aligned_ok else "Fail", weights["trend"], trend_sub)
+    add("Location", f"{loc} ({dist_str})", "Pass" if loc_ok else "Fail", weights["location"], loc_sub)
+    if cost_sub is None:
+        add("Cost basis", "N/A", "N/A", weights["cost_basis"], None)
     else:
-        add("Cost basis", cb, True, cb == "Clean")
-
-    add("Trigger (RSI)", f"{rsi_state} ({rsi_str})", True, trigger_ok)
-
-    if cfg["vol_required"]:
-        add("Rel volume", relv_str, True, vol_confirm)
+        add("Cost basis", cb, "Pass" if cb == "Clean" else "Fail", weights["cost_basis"], cost_sub)
+    add("Trigger (RSI)", f"{rsi_state} ({rsi_str})", "Pass" if trigger_ok else "Fail", weights["trigger"], trig_sub)
+    if vol_sub is None:
+        add("Rel volume", "N/A", "N/A", weights["volume"], None)
     else:
-        add("Rel volume", relv_str, False, vol_confirm, read="Neutral")
-
-    if rs_read in ("N/A", "nan", "None"):
-        add("Rel strength", "N/A", False, False, read="N/A")
+        vol_read = "Pass" if vol_confirm else ("Neutral" if not cfg["vol_required"] else "Fail")
+        add("Rel volume", relv_str, vol_read, weights["volume"], vol_sub)
+    if rs_sub is None:
+        add("Rel strength", "N/A", "N/A", weights["rs"], None)
     else:
         rs_value = f"{rs_read} ({rsret_str})" if rsret_str else rs_read
-        add("Rel strength", rs_value, True, rs_ok)
+        add("Rel strength", rs_value, "Pass" if rs_ok else "Fail", weights["rs"], rs_sub)
 
-    applicable = [c for c in components if c["_app"]]
-    passed = [c for c in applicable if c["_pass"]]
-    n_app = len(applicable)
-    pass_ratio = (len(passed) / n_app) if n_app else 0.0
+    scored = [c for c in components if c["_sub"] is not None]
+    total_w = sum(c["_w"] for c in scored)
+    score = (
+        round(100.0 * sum(c["_w"] * c["_sub"] for c in scored) / total_w, 1)
+        if total_w > 0
+        else np.nan
+    )
 
-    if pass_ratio >= 0.80:
+    if not pd.isna(score) and score >= 75:
         grade = "A"
-    elif pass_ratio >= 0.55:
+    elif not pd.isna(score) and score >= 55:
         grade = "B"
     else:
         grade = "C"
@@ -431,14 +496,110 @@ def grade_setup(summary: dict, strategy_type: str, direction: str) -> dict:
 
     return {
         "grade": grade,
-        "pass_ratio": pass_ratio,
-        "passed": len(passed),
-        "applicable": n_app,
+        "score": score,
         "reason": reason,
         "components": [
             {k: v for k, v in c.items() if not k.startswith("_")} for c in components
         ],
     }
+
+
+def backtest_triggers(
+    df: pd.DataFrame, strategy_type: str, direction: str
+) -> Tuple[dict, pd.DataFrame]:
+    """Replay historical entry triggers to estimate hit-rate and average R.
+
+    For each historical bar where ``Entry_Trigger`` fired, simulate a trade entered at
+    that bar's close with the same ATR stop distance used by the stop engine and an
+    ATR-multiple target. Walk forward up to the strategy's holding window and record
+    whether the target (win) or stop (loss) was hit first. Bars where neither is hit by
+    the end of the window are marked ``Open`` and excluded from the win rate. This is a
+    look-ahead-safe what-if (the signal uses only data up to the entry bar), not a
+    trading simulation: it ignores slippage, gaps mid-bar, and overlapping positions.
+    """
+    df = df.copy()
+    df["Trigger_Outcome"] = ""
+    df["Trigger_R"] = np.nan
+
+    empty_stats = {
+        "signals": 0, "wins": 0, "losses": 0, "open": 0,
+        "win_rate": np.nan, "avg_r": np.nan, "expectancy": np.nan,
+        "hold_bars": int(ENTRY_CONFIG[strategy_type]["target_n"]),
+        "reward_atr": ENTRY_CONFIG[strategy_type]["reward_atr"],
+    }
+    if "Entry_Trigger" not in df.columns or "Stop Distance" not in df.columns:
+        return empty_stats, df
+
+    cfg = ENTRY_CONFIG[strategy_type]
+    reward_atr = cfg["reward_atr"]
+    hold = int(cfg["target_n"])
+    is_long = direction.lower() == "long"
+
+    close = df["Close"].to_numpy(dtype=float)
+    high = df["High"].to_numpy(dtype=float)
+    low = df["Low"].to_numpy(dtype=float)
+    atr = df["ATR"].to_numpy(dtype=float)
+    stopd = df["Stop Distance"].to_numpy(dtype=float)
+    trig = df["Entry_Trigger"].fillna(False).to_numpy(dtype=bool)
+    n = len(df)
+
+    outcomes = np.array([""] * n, dtype=object)
+    realized = np.full(n, np.nan)
+
+    for i in range(n):
+        if not trig[i]:
+            continue
+        risk, a, entry = stopd[i], atr[i], close[i]
+        if not (np.isfinite(risk) and risk > 0 and np.isfinite(a) and a > 0):
+            continue
+        reward = reward_atr * a
+        if is_long:
+            target, stop = entry + reward, entry - risk
+        else:
+            target, stop = entry - reward, entry + risk
+
+        end = min(i + hold, n - 1)
+        outcome, r_val = None, None
+        for j in range(i + 1, end + 1):
+            if is_long:
+                hit_stop, hit_tgt = low[j] <= stop, high[j] >= target
+            else:
+                hit_stop, hit_tgt = high[j] >= stop, low[j] <= target
+            if hit_stop:  # conservative: if both hit in one bar, assume stop first
+                outcome, r_val = "Loss", -1.0
+                break
+            if hit_tgt:
+                outcome, r_val = "Win", reward / risk
+                break
+        if outcome is None:
+            outcome = "Open"
+            r_val = ((close[end] - entry) if is_long else (entry - close[end])) / risk
+
+        outcomes[i], realized[i] = outcome, r_val
+
+    df["Trigger_Outcome"] = outcomes
+    df["Trigger_R"] = realized
+
+    signal_mask = outcomes != ""
+    all_r = realized[signal_mask]
+    wins = int((outcomes == "Win").sum())
+    losses = int((outcomes == "Loss").sum())
+    opens = int((outcomes == "Open").sum())
+    closed = wins + losses
+    closed_r = realized[(outcomes == "Win") | (outcomes == "Loss")]
+
+    stats = {
+        "signals": int(signal_mask.sum()),
+        "wins": wins,
+        "losses": losses,
+        "open": opens,
+        "win_rate": (wins / closed * 100) if closed else np.nan,
+        "avg_r": float(np.nanmean(closed_r)) if closed_r.size else np.nan,
+        "expectancy": float(np.nanmean(all_r)) if all_r.size else np.nan,
+        "hold_bars": hold,
+        "reward_atr": reward_atr,
+    }
+    return stats, df
 
 
 def close_mobile_sidebar() -> None:
@@ -799,6 +960,7 @@ def generate_stop_for_ticker(
         custom_multiplier=custom_multiplier,
     )
     df = apply_strategy_entry_features(df, strategy_type, direction)
+    backtest_stats, df = backtest_triggers(df, strategy_type, direction)
 
     stop = calculate_best_stop(
         entry_price=vol_summary["entry_price"],
@@ -860,15 +1022,23 @@ def generate_stop_for_ticker(
     )
 
     vol_summary["grade"] = grade_setup(vol_summary, strategy_type, direction)
+    vol_summary["backtest"] = backtest_stats
 
     stop.update(
         {
+            "Entry Score": vol_summary["grade"]["score"],
             "Setup Grade": vol_summary["grade"]["grade"],
             "Trend Alignment": vol_summary["trend_alignment"],
             "Location": vol_summary["location_state"],
             "RSI": round(vol_summary["rsi"], 1) if not pd.isna(vol_summary["rsi"]) else np.nan,
             "RSI State": vol_summary["rsi_state"],
             "Rel Strength": vol_summary["rs_read"],
+            "Signal Win %": round(backtest_stats["win_rate"], 1)
+            if not pd.isna(backtest_stats["win_rate"])
+            else np.nan,
+            "Signal Avg R": round(backtest_stats["avg_r"], 2)
+            if not pd.isna(backtest_stats["avg_r"])
+            else np.nan,
         }
     )
 
@@ -895,13 +1065,16 @@ def render_entry_panel(
     )
 
     grade_letter = grade["grade"]
+    score = grade.get("score", np.nan)
+    score_str = f"{score:.0f}/100" if not pd.isna(score) else "n/a"
     grade_colors = {"A": "#1a7f37", "B": "#9a6700", "C": "#6e7781"}
     color = grade_colors.get(grade_letter, "#6e7781")
     st.markdown(
         f"<div style='font-size:1.05rem;margin-bottom:0.5rem'>"
         f"<span style='background:{color};color:white;padding:2px 12px;border-radius:6px;"
         f"font-weight:700;margin-right:10px'>{grade_letter}</span>"
-        f"{grade['reason']}</div>",
+        f"<span style='font-weight:700;margin-right:10px'>Entry Score {score_str}</span>"
+        f"<span style='color:#444'>{grade['reason']}</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -983,9 +1156,46 @@ def render_entry_panel(
             "stop risk. Consider a different entry or target."
         )
 
-    st.caption("Setup components")
+    st.caption("Setup components (Score is each factor's 0-100 sub-score; Weight is its share of the Entry Score)")
     comp_df = pd.DataFrame(grade["components"])
     st.dataframe(comp_df, width="stretch", hide_index=True)
+
+    backtest = summary.get("backtest")
+    if backtest and backtest.get("signals", 0) > 0:
+        st.caption(
+            f"{selected} historical entry-trigger replay — entered at each trigger's close "
+            f"with the same ATR stop and a {backtest['reward_atr']:.1f}×ATR target, held up "
+            f"to {backtest['hold_bars']} bars. Look-ahead-safe what-if, not a trading "
+            f"simulation (ignores slippage, gaps, and overlapping positions)."
+        )
+        bt_cols = st.columns(5)
+        bt_cols[0].metric(
+            "Signals",
+            f"{backtest['signals']}",
+            help="Historical bars where trend, location, and the RSI trigger all fired.",
+        )
+        bt_cols[1].metric(
+            "Win rate",
+            f"{backtest['win_rate']:.0f}%" if not pd.isna(backtest["win_rate"]) else "N/A",
+            help="Wins / (wins + losses). Open trades that never hit target or stop are excluded.",
+        )
+        bt_cols[2].metric(
+            "Avg R (closed)",
+            f"{backtest['avg_r']:+.2f}R" if not pd.isna(backtest["avg_r"]) else "N/A",
+            help="Average realized R across closed trades (win = +reward:risk, loss = -1R).",
+        )
+        bt_cols[3].metric(
+            "Expectancy",
+            f"{backtest['expectancy']:+.2f}R" if not pd.isna(backtest["expectancy"]) else "N/A",
+            help="Average R across all signals, including open trades marked to market.",
+        )
+        bt_cols[4].metric(
+            "W / L / Open",
+            f"{backtest['wins']} / {backtest['losses']} / {backtest['open']}",
+            help="Counts of winning, losing, and still-open simulated trades.",
+        )
+    else:
+        st.caption("No historical entry triggers in the available window to backtest.")
 
     with st.expander("How the Entry Panel works", expanded=False):
         st.markdown(
@@ -993,10 +1203,12 @@ def render_entry_panel(
             The Entry Panel adds **entry timing** context on top of the existing stop/risk engine,
             so a full trade plan reads as `entry → stop → target → reward:risk → size`.
 
-            - **Setup grade (A/B/C)** counts how many direction-aware conditions pass: trend
+            - **Entry Score (0-100)** is a weighted blend of direction-aware sub-scores: trend
               alignment, location vs. support (in ATR), cost basis, the RSI trigger, relative
-              volume (for breakout strategies), and relative strength vs. the benchmark.
-              Conditions with missing data are excluded so they do not unfairly penalize the grade.
+              volume, and relative strength vs. the benchmark. Each factor scores 0-100 and is
+              weighted per strategy (e.g. trend leans on alignment and relative strength). Factors
+              with missing data are excluded and the rest are renormalized. The **A/B/C grade** is
+              derived from the score (A ≥ 75, B ≥ 55, else C).
             - **Location** measures distance from MA50 in ATR units — a shallow pullback toward
               rising support scores better than chasing an extended move.
             - **Trigger (RSI)** favors a pullback that is resetting back up (for longs) rather than
@@ -1005,9 +1217,13 @@ def render_entry_panel(
               fixed (it is volatility-based), while the stop price, risk %, and shares update.
             - **Target** is the nearest recent swing level (structure) or a fixed ATR multiple,
               and drives the reward:risk estimate.
+            - **Signal replay** walks every historical trigger forward with the same ATR stop and
+              an ATR-multiple target to estimate win rate, average R, and expectancy. It is a
+              look-ahead-safe what-if for calibration only — it ignores slippage, intrabar gaps,
+              and overlapping positions, so treat it as rough context, not a track record.
 
-            All thresholds are tuned per strategy. This is educational setup context, not a trade
-            recommendation.
+            All thresholds and weights are tuned per strategy. This is educational setup context,
+            not a trade recommendation.
             """
         )
 
@@ -1357,24 +1573,47 @@ if st.session_state.results:
 
     chart_layers = price_chart
     if show_triggers and "Entry_Trigger" in hist.columns:
+        has_outcome = "Trigger_Outcome" in hist.columns
+        marker_cols = ["Close"] + (["Trigger_Outcome", "Trigger_R"] if has_outcome else [])
         trigger_points = (
             hist[hist["Entry_Trigger"].fillna(False)]
-            .reset_index(names="Date")[["Date", "Close"]]
+            .reset_index(names="Date")[["Date"] + marker_cols]
             .dropna(subset=["Close"])
         )
         if not trigger_points.empty:
             panel_direction = summary.get("direction", direction)
             marker_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
+            tooltip = [
+                alt.Tooltip("Date:T", title="Trigger Date"),
+                alt.Tooltip("Close:Q", title="Close", format=",.2f"),
+            ]
+            if has_outcome:
+                trigger_points["Trigger_Outcome"] = trigger_points["Trigger_Outcome"].replace(
+                    "", "Open"
+                )
+                tooltip += [
+                    alt.Tooltip("Trigger_Outcome:N", title="Outcome"),
+                    alt.Tooltip("Trigger_R:Q", title="Realized R", format="+.2f"),
+                ]
+                color_enc = alt.Color(
+                    "Trigger_Outcome:N",
+                    title="Trigger outcome",
+                    scale=alt.Scale(
+                        domain=["Win", "Loss", "Open"],
+                        range=["#1a7f37", "#c1121f", "#6e7781"],
+                    ),
+                )
+            else:
+                color_enc = alt.value("#1a7f37")
+
             marker_layer = (
                 alt.Chart(trigger_points)
-                .mark_point(shape=marker_shape, size=90, filled=True, color="#1a7f37", opacity=0.85)
+                .mark_point(shape=marker_shape, size=90, filled=True, opacity=0.85)
                 .encode(
                     x=alt.X("Date:T"),
                     y=alt.Y("Close:Q"),
-                    tooltip=[
-                        alt.Tooltip("Date:T", title="Trigger Date"),
-                        alt.Tooltip("Close:Q", title="Close", format=",.2f"),
-                    ],
+                    color=color_enc,
+                    tooltip=tooltip,
                 )
             )
             chart_layers = alt.layer(price_chart, marker_layer)
