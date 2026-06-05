@@ -27,6 +27,29 @@ STRATEGY_LABELS = {
     "position": "Position",
 }
 
+# Default benchmark for relative-strength comparison.
+BENCHMARK = "SPY"
+
+# Per-strategy entry tunables. Location bands are in ATR units of distance from MA50;
+# target_n is the structure-target lookback; reward_atr is the fallback ATR-multiple
+# target; rsi_lo/rsi_hi define the RSI reset band; vol_mult is the relative-volume
+# confirmation threshold; vol_required gates the grade for breakout strategies;
+# rs_lookback is the relative-return window (bars). See docs/entry-panel-design.md.
+ENTRY_CONFIG: Dict[str, Dict[str, float]] = {
+    "day": {"support": 0.30, "near": 1.0, "ext": 2.0, "target_n": 10,
+            "reward_atr": 2.0, "rsi_lo": 40, "rsi_hi": 60,
+            "vol_mult": 2.0, "vol_required": True, "rs_lookback": 21},
+    "swing": {"support": 0.50, "near": 1.5, "ext": 3.0, "target_n": 20,
+              "reward_atr": 3.0, "rsi_lo": 35, "rsi_hi": 55,
+              "vol_mult": 1.5, "vol_required": False, "rs_lookback": 42},
+    "trend": {"support": 0.75, "near": 2.0, "ext": 4.0, "target_n": 55,
+              "reward_atr": 5.0, "rsi_lo": 40, "rsi_hi": 60,
+              "vol_mult": 1.3, "vol_required": True, "rs_lookback": 63},
+    "position": {"support": 1.00, "near": 3.0, "ext": 5.0, "target_n": 120,
+                 "reward_atr": 6.0, "rsi_lo": 40, "rsi_hi": 60,
+                 "vol_mult": 1.2, "vol_required": False, "rs_lookback": 126},
+}
+
 ETF_KEYWORDS = [
     "ETF",
     "Fund",
@@ -109,6 +132,313 @@ def score_to_regime(score: float) -> str:
     if score > 1.50:
         return "High"
     return "Normal"
+
+
+def wilder_rsi(close: pd.Series, window: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1 / window, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / window, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def add_entry_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add direction/strategy-independent entry context columns."""
+    atr_safe = df["ATR"].where(df["ATR"] > 0)
+
+    df["Dist_MA50_ATR"] = (df["Close"] - df["MA50"]) / atr_safe
+    df["Dist_MA200_ATR"] = (df["Close"] - df["MA200"]) / atr_safe
+    df["Dist_VWAP50_ATR"] = (df["Close"] - df["VWAP50"]) / atr_safe
+
+    close, ma50, ma200 = df["Close"], df["MA50"], df["MA200"]
+    has_ma200 = ma200.notna()
+    df["Trend_Alignment"] = np.select(
+        [
+            has_ma200 & (close > ma50) & (ma50 > ma200),
+            has_ma200 & (close < ma50) & (ma50 < ma200),
+            ~has_ma200 & (close > ma50),
+            ~has_ma200 & (close < ma50),
+        ],
+        ["Aligned Long", "Aligned Short", "Aligned Long*", "Aligned Short*"],
+        default="Mixed",
+    )
+
+    vwap = df["VWAP50"]
+    df["CostBasis_Flag"] = np.select(
+        [vwap.isna(), (close > ma50) & (close < vwap)],
+        ["N/A", "Overhead Supply"],
+        default="Clean",
+    )
+
+    df["RSI"] = wilder_rsi(df["Close"])
+
+    if "Volume" in df.columns:
+        avg_volume = df["Volume"].rolling(20).mean()
+        df["RelVolume"] = df["Volume"] / avg_volume.replace(0, np.nan)
+    else:
+        df["RelVolume"] = np.nan
+
+    return df
+
+
+def add_relative_strength(df: pd.DataFrame, benchmark: str = BENCHMARK) -> pd.DataFrame:
+    """Join a benchmark series and compute the relative-strength line and slope."""
+    bench = download_price_history(benchmark, period="1y")
+    if not bench.empty:
+        bench_close = bench[["Close"]].rename(columns={"Close": "BENCH_Close"})
+        df = df.join(bench_close, how="left")
+        df["BENCH_Close"] = df["BENCH_Close"].ffill()
+        df["RS_Ratio"] = df["Close"] / df["BENCH_Close"].replace(0, np.nan)
+        df["RS_Slope"] = df["RS_Ratio"].diff(21)
+    else:
+        df["BENCH_Close"] = np.nan
+        df["RS_Ratio"] = np.nan
+        df["RS_Slope"] = np.nan
+    return df
+
+
+def _classify_location_series(dist: pd.Series, direction: str, cfg: Dict[str, float]) -> np.ndarray:
+    d = dist if direction == "long" else -dist
+    return np.select(
+        [d.isna(), d < -cfg["support"], d <= cfg["support"], d <= cfg["near"], d <= cfg["ext"]],
+        ["Neutral", "Below Support", "At Support", "Near", "Neutral"],
+        default="Extended",
+    )
+
+
+def _classify_rsi_series(rsi: pd.Series, direction: str, cfg: Dict[str, float]) -> np.ndarray:
+    lo, hi = cfg["rsi_lo"], cfg["rsi_hi"]
+    if direction == "long":
+        rising = rsi > rsi.shift(1)
+        return np.select(
+            [rsi.isna(), rsi >= 70, rsi < lo, (rsi >= lo) & (rsi <= hi) & rising],
+            ["Neutral", "Overbought", "Oversold", "Resetting Up"],
+            default="Neutral",
+        )
+    falling = rsi < rsi.shift(1)
+    return np.select(
+        [rsi.isna(), rsi <= 30, rsi > 70, (rsi >= (100 - hi)) & (rsi <= (100 - lo)) & falling],
+        ["Neutral", "Oversold", "Overbought", "Resetting Down"],
+        default="Neutral",
+    )
+
+
+def apply_strategy_entry_features(
+    df: pd.DataFrame, strategy_type: str, direction: str
+) -> pd.DataFrame:
+    """Add direction/strategy-dependent entry columns to a (copied) DataFrame."""
+    cfg = ENTRY_CONFIG[strategy_type]
+    direction = direction.lower()
+
+    df["Location_State"] = _classify_location_series(df["Dist_MA50_ATR"], direction, cfg)
+    df["RSI_State"] = _classify_rsi_series(df["RSI"], direction, cfg)
+
+    if "BENCH_Close" in df.columns and df["BENCH_Close"].notna().any():
+        n = int(cfg["rs_lookback"])
+        df["RS_Return_Rel"] = (
+            df["Close"].pct_change(n) - df["BENCH_Close"].pct_change(n)
+        ) * 100
+    else:
+        df["RS_Return_Rel"] = np.nan
+
+    rr, slope = df["RS_Return_Rel"], df.get("RS_Slope", pd.Series(np.nan, index=df.index))
+    df["RS_Read"] = np.select(
+        [
+            rr.isna(),
+            (rr > 0) & (slope > 0),
+            (rr > 0) & (slope <= 0),
+            (rr <= 0) & (slope > 0),
+        ],
+        ["N/A", "Leader", "Cooling Leader", "Improving Laggard"],
+        default="Laggard",
+    )
+
+    df["Vol_Confirm"] = df["RelVolume"] >= cfg["vol_mult"]
+
+    aligned_set = (
+        ["Aligned Long", "Aligned Long*"]
+        if direction == "long"
+        else ["Aligned Short", "Aligned Short*"]
+    )
+    rsi_fire = (
+        ["Oversold", "Resetting Up"]
+        if direction == "long"
+        else ["Overbought", "Resetting Down"]
+    )
+    df["Entry_Trigger"] = (
+        df["Trend_Alignment"].isin(aligned_set)
+        & df["Location_State"].isin(["At Support", "Near"])
+        & df["RSI_State"].isin(rsi_fire)
+    )
+
+    return df
+
+
+def compute_target(
+    entry_price: float,
+    atr_value: float,
+    direction: str,
+    strategy_type: str,
+    df: pd.DataFrame,
+    method: str = "structure",
+) -> dict:
+    """Estimate a target price from recent structure or an ATR multiple."""
+    cfg = ENTRY_CONFIG[strategy_type]
+    direction = direction.lower()
+    n = int(cfg["target_n"])
+    reward_atr = cfg["reward_atr"]
+
+    atr_target = (
+        entry_price + reward_atr * atr_value
+        if direction == "long"
+        else entry_price - reward_atr * atr_value
+    )
+
+    target_price = atr_target
+    target_method = "atr"
+
+    if method == "structure" and len(df) > n:
+        window = df.iloc[-(n + 1):-1]
+        if direction == "long":
+            level = window["High"].max()
+            if not pd.isna(level) and level > entry_price:
+                target_price, target_method = float(level), "structure"
+        else:
+            level = window["Low"].min()
+            if not pd.isna(level) and level < entry_price:
+                target_price, target_method = float(level), "structure"
+
+    return {
+        "target_price": float(target_price),
+        "target_method": target_method,
+        "reward_distance": abs(float(target_price) - entry_price),
+    }
+
+
+def build_trade_plan(
+    planned_entry: float,
+    stop_distance: float,
+    direction: str,
+    target_price: float,
+) -> dict:
+    """Recompute the stop/target/reward:risk plan at a chosen entry price."""
+    direction = direction.lower()
+    stop_price = (
+        planned_entry - stop_distance
+        if direction == "long"
+        else planned_entry + stop_distance
+    )
+    risk_distance = abs(stop_distance)
+    reward_distance = abs(target_price - planned_entry)
+    reward_to_risk = reward_distance / risk_distance if risk_distance > 0 else np.nan
+    risk_pct = (stop_distance / planned_entry) * 100 if planned_entry > 0 else np.nan
+
+    return {
+        "Planned Entry": round(planned_entry, 2),
+        "Stop Price": round(stop_price, 2),
+        "Stop Distance": round(stop_distance, 2),
+        "Target": round(target_price, 2),
+        "Risk %": round(risk_pct, 2) if not pd.isna(risk_pct) else np.nan,
+        "Reward:Risk": round(reward_to_risk, 2) if not pd.isna(reward_to_risk) else np.nan,
+    }
+
+
+def grade_setup(summary: dict, strategy_type: str, direction: str) -> dict:
+    """Build a coarse A/B/C setup grade and its explainable components."""
+    cfg = ENTRY_CONFIG[strategy_type]
+    is_long = direction.lower() == "long"
+    benchmark = summary.get("benchmark", BENCHMARK)
+
+    ta = str(summary.get("trend_alignment"))
+    loc = str(summary.get("location_state"))
+    cb = str(summary.get("cost_basis_flag"))
+    rsi_state = str(summary.get("rsi_state"))
+    rs_read = str(summary.get("rs_read"))
+    vol_confirm = bool(summary.get("vol_confirm"))
+
+    aligned_ok = ta in (
+        ("Aligned Long", "Aligned Long*") if is_long else ("Aligned Short", "Aligned Short*")
+    )
+    loc_ok = loc in ("At Support", "Near")
+    trigger_ok = rsi_state in (
+        ("Oversold", "Resetting Up") if is_long else ("Overbought", "Resetting Down")
+    )
+    rs_ok = rs_read in ("Leader", "Improving Laggard")
+
+    dist = summary.get("dist_ma50_atr")
+    dist_str = (
+        f"{dist:+.1f} ATR vs MA50" if dist is not None and not pd.isna(dist) else "n/a"
+    )
+    rsi_val = summary.get("rsi")
+    rsi_str = f"{rsi_val:.0f}" if rsi_val is not None and not pd.isna(rsi_val) else "n/a"
+    relv = summary.get("rel_volume")
+    relv_str = f"{relv:.1f}x avg" if relv is not None and not pd.isna(relv) else "n/a"
+    rsret = summary.get("rs_return_rel")
+    rsret_str = (
+        f"{rsret:+.1f}% vs {benchmark}"
+        if rsret is not None and not pd.isna(rsret)
+        else ""
+    )
+
+    components = []
+
+    def add(factor, value, applicable, passed, read=None):
+        if read is None:
+            read = "Pass" if passed else "Fail"
+        components.append(
+            {"Factor": factor, "Value": value, "Read": read, "_app": applicable, "_pass": passed}
+        )
+
+    add("Trend alignment", ta, True, aligned_ok)
+    add("Location", f"{loc} ({dist_str})", True, loc_ok)
+
+    if cb == "N/A":
+        add("Cost basis", "N/A", False, False, read="N/A")
+    else:
+        add("Cost basis", cb, True, cb == "Clean")
+
+    add("Trigger (RSI)", f"{rsi_state} ({rsi_str})", True, trigger_ok)
+
+    if cfg["vol_required"]:
+        add("Rel volume", relv_str, True, vol_confirm)
+    else:
+        add("Rel volume", relv_str, False, vol_confirm, read="Neutral")
+
+    if rs_read in ("N/A", "nan", "None"):
+        add("Rel strength", "N/A", False, False, read="N/A")
+    else:
+        rs_value = f"{rs_read} ({rsret_str})" if rsret_str else rs_read
+        add("Rel strength", rs_value, True, rs_ok)
+
+    applicable = [c for c in components if c["_app"]]
+    passed = [c for c in applicable if c["_pass"]]
+    n_app = len(applicable)
+    pass_ratio = (len(passed) / n_app) if n_app else 0.0
+
+    if pass_ratio >= 0.80:
+        grade = "A"
+    elif pass_ratio >= 0.55:
+        grade = "B"
+    else:
+        grade = "C"
+
+    reason_parts = [ta, f"{loc} location", f"RSI {rsi_state}"]
+    if rs_read not in ("N/A", "nan", "None"):
+        reason_parts.append(f"{rs_read} RS")
+    reason = " · ".join(reason_parts)
+
+    return {
+        "grade": grade,
+        "pass_ratio": pass_ratio,
+        "passed": len(passed),
+        "applicable": n_app,
+        "reason": reason,
+        "components": [
+            {k: v for k, v in c.items() if not k.startswith("_")} for c in components
+        ],
+    }
 
 
 def close_mobile_sidebar() -> None:
@@ -211,6 +541,7 @@ def calculate_volatility_indicators(
     regime_window: int = 50,
     bb_window: int = 20,
     use_vix: bool = True,
+    benchmark: str = BENCHMARK,
 ) -> Tuple[pd.DataFrame, dict]:
     df = download_price_history(ticker, period="1y")
     min_required_rows = max(atr_window, regime_window, bb_window, 200) + MIN_HISTORY_BUFFER
@@ -282,10 +613,15 @@ def calculate_volatility_indicators(
 
     df["Volatility_Regime"] = df["Regime_Score"].apply(score_to_regime)
 
+    # Entry context (direction/strategy-independent) and relative strength
+    df = add_entry_features(df)
+    df = add_relative_strength(df, benchmark=benchmark)
+
     latest = df.dropna(subset=["Close", "ATR", "Volatility_Regime"]).iloc[-1]
 
     summary = {
         "ticker": ticker,
+        "benchmark": benchmark,
         "entry_price": float(latest["Close"]),
         "atr": float(latest["ATR"]),
         "ma50": float(latest["MA50"]) if not pd.isna(latest["MA50"]) else np.nan,
@@ -440,6 +776,7 @@ def generate_stop_for_ticker(
     use_vix: bool,
     override_regime: Optional[str] = None,
     custom_multiplier: Optional[float] = None,
+    benchmark: str = BENCHMARK,
 ) -> Tuple[dict, pd.DataFrame, dict]:
     df, vol_summary = calculate_volatility_indicators(
         ticker=ticker,
@@ -447,6 +784,7 @@ def generate_stop_for_ticker(
         regime_window=regime_window,
         bb_window=bb_window,
         use_vix=use_vix,
+        benchmark=benchmark,
     )
 
     info = download_ticker_info(ticker)
@@ -460,6 +798,7 @@ def generate_stop_for_ticker(
         override_regime=override_regime,
         custom_multiplier=custom_multiplier,
     )
+    df = apply_strategy_entry_features(df, strategy_type, direction)
 
     stop = calculate_best_stop(
         entry_price=vol_summary["entry_price"],
@@ -494,7 +833,183 @@ def generate_stop_for_ticker(
         }
     )
 
+    # Fold latest-bar entry context into the summary and grade the setup
+    entry_latest = df.dropna(subset=["Close"]).iloc[-1]
+
+    def _num(value):
+        return float(value) if value is not None and not pd.isna(value) else np.nan
+
+    vol_summary.update(
+        {
+            "strategy_type": strategy_type,
+            "direction": direction,
+            "dist_ma50_atr": _num(entry_latest.get("Dist_MA50_ATR")),
+            "dist_vwap50_atr": _num(entry_latest.get("Dist_VWAP50_ATR")),
+            "trend_alignment": str(entry_latest.get("Trend_Alignment")),
+            "location_state": str(entry_latest.get("Location_State")),
+            "cost_basis_flag": str(entry_latest.get("CostBasis_Flag")),
+            "rsi": _num(entry_latest.get("RSI")),
+            "rsi_state": str(entry_latest.get("RSI_State")),
+            "rel_volume": _num(entry_latest.get("RelVolume")),
+            "vol_confirm": bool(entry_latest.get("Vol_Confirm"))
+            if not pd.isna(entry_latest.get("Vol_Confirm"))
+            else False,
+            "rs_return_rel": _num(entry_latest.get("RS_Return_Rel")),
+            "rs_read": str(entry_latest.get("RS_Read")),
+        }
+    )
+
+    vol_summary["grade"] = grade_setup(vol_summary, strategy_type, direction)
+
+    stop.update(
+        {
+            "Setup Grade": vol_summary["grade"]["grade"],
+            "Trend Alignment": vol_summary["trend_alignment"],
+            "Location": vol_summary["location_state"],
+            "RSI": round(vol_summary["rsi"], 1) if not pd.isna(vol_summary["rsi"]) else np.nan,
+            "RSI State": vol_summary["rsi_state"],
+            "Rel Strength": vol_summary["rs_read"],
+        }
+    )
+
     return stop, df, vol_summary
+
+
+def render_entry_panel(
+    selected: str,
+    hist: pd.DataFrame,
+    summary: dict,
+    selected_result: pd.Series,
+) -> None:
+    """Render the Entry Panel: grade headline, trade plan, and component table."""
+    strategy_type_panel = summary.get("strategy_type", "trend")
+    direction_panel = summary.get("direction", "long")
+    grade = summary.get("grade") or grade_setup(
+        summary, strategy_type_panel, direction_panel
+    )
+
+    st.subheader(f"{selected} Entry Setup")
+    st.caption(
+        "Completes the trade plan with entry trigger, location, target, and reward:risk. "
+        "Setup context for education only — not a trade recommendation."
+    )
+
+    grade_letter = grade["grade"]
+    grade_colors = {"A": "#1a7f37", "B": "#9a6700", "C": "#6e7781"}
+    color = grade_colors.get(grade_letter, "#6e7781")
+    st.markdown(
+        f"<div style='font-size:1.05rem;margin-bottom:0.5rem'>"
+        f"<span style='background:{color};color:white;padding:2px 12px;border-radius:6px;"
+        f"font-weight:700;margin-right:10px'>{grade_letter}</span>"
+        f"{grade['reason']}</div>",
+        unsafe_allow_html=True,
+    )
+
+    ctrl = st.columns(2)
+    default_entry = float(summary["entry_price"])
+    step = max(0.01, round(default_entry * 0.001, 2))
+    planned_entry = ctrl[0].number_input(
+        "Planned entry price",
+        min_value=0.0,
+        value=default_entry,
+        step=step,
+        key=f"planned_entry_{selected}",
+        help="Model the plan at a chosen entry. Defaults to the latest close.",
+    )
+    target_method = ctrl[1].selectbox(
+        "Target method",
+        options=["structure", "atr"],
+        format_func=lambda m: "Structure (swing level)" if m == "structure" else "ATR multiple",
+        key=f"target_method_{selected}",
+        help="Structure uses the nearest recent swing high/low; ATR uses a fixed ATR multiple.",
+    )
+
+    if planned_entry <= 0:
+        planned_entry = default_entry
+        st.warning("Planned entry must be positive; using the latest close instead.")
+
+    atr_value = float(summary["atr"])
+    stop_distance = float(selected_result["Stop Distance"])
+    tgt = compute_target(
+        planned_entry, atr_value, direction_panel, strategy_type_panel, hist, method=target_method
+    )
+    plan = build_trade_plan(planned_entry, stop_distance, direction_panel, tgt["target_price"])
+
+    shares = None
+    if enable_position_sizing and account_size and risk_pct:
+        sizing = calculate_position_size(
+            account_size=float(account_size),
+            risk_pct=float(risk_pct),
+            stop_distance=stop_distance,
+            entry_price=planned_entry,
+            max_position_pct=max_position_pct,
+        )
+        shares = sizing["Final Shares"]
+
+    plan_cols = st.columns(6 if shares is not None else 5)
+    plan_cols[0].metric("Planned Entry", f"${plan['Planned Entry']:.2f}")
+    plan_cols[1].metric(
+        "Stop",
+        f"${plan['Stop Price']:.2f}",
+        help="Stop price at the planned entry (stop distance is volatility-based and fixed).",
+    )
+    plan_cols[2].metric(
+        "Target",
+        f"${plan['Target']:.2f}",
+        help=f"{tgt['target_method'].capitalize()} target.",
+    )
+    rr = plan["Reward:Risk"]
+    plan_cols[3].metric(
+        "Reward:Risk",
+        f"{rr:.2f}R" if not pd.isna(rr) else "N/A",
+        help="Distance to target divided by stop distance.",
+    )
+    risk_pct_val = plan["Risk %"]
+    plan_cols[4].metric(
+        "Risk %",
+        f"{risk_pct_val:.2f}%" if not pd.isna(risk_pct_val) else "N/A",
+        help="How far price can move against the planned entry before the stop is hit.",
+    )
+    if shares is not None:
+        plan_cols[5].metric(
+            "Shares",
+            f"{int(shares):,}" if not pd.isna(shares) else "N/A",
+            help="Risk-based share count at the planned entry.",
+        )
+
+    if not pd.isna(rr) and rr < 1:
+        st.warning(
+            "Reward:Risk is below 1R — limited upside to the nearest target relative to "
+            "stop risk. Consider a different entry or target."
+        )
+
+    st.caption("Setup components")
+    comp_df = pd.DataFrame(grade["components"])
+    st.dataframe(comp_df, width="stretch", hide_index=True)
+
+    with st.expander("How the Entry Panel works", expanded=False):
+        st.markdown(
+            """
+            The Entry Panel adds **entry timing** context on top of the existing stop/risk engine,
+            so a full trade plan reads as `entry → stop → target → reward:risk → size`.
+
+            - **Setup grade (A/B/C)** counts how many direction-aware conditions pass: trend
+              alignment, location vs. support (in ATR), cost basis, the RSI trigger, relative
+              volume (for breakout strategies), and relative strength vs. the benchmark.
+              Conditions with missing data are excluded so they do not unfairly penalize the grade.
+            - **Location** measures distance from MA50 in ATR units — a shallow pullback toward
+              rising support scores better than chasing an extended move.
+            - **Trigger (RSI)** favors a pullback that is resetting back up (for longs) rather than
+              a chase at overbought.
+            - **Planned entry** lets you model the plan at any price; the stop *distance* stays
+              fixed (it is volatility-based), while the stop price, risk %, and shares update.
+            - **Target** is the nearest recent swing level (structure) or a fixed ATR multiple,
+              and drives the reward:risk estimate.
+
+            All thresholds are tuned per strategy. This is educational setup context, not a trade
+            recommendation.
+            """
+        )
 
 
 # =========================
@@ -584,6 +1099,12 @@ with st.sidebar:
         "Use VIX macro overlay",
         value=True,
         help="Includes VIX volatility regime as a broad market risk signal.",
+    )
+    benchmark = st.selectbox(
+        "Relative-strength benchmark",
+        options=["SPY", "QQQ", "IWM", "DIA"],
+        index=0,
+        help="Benchmark used to measure the ticker's relative strength for entry context.",
     )
 
     st.divider()
@@ -699,6 +1220,7 @@ if run_button:
                     use_vix=bool(use_vix),
                     override_regime=override_regime,
                     custom_multiplier=custom_multiplier,
+                    benchmark=str(benchmark),
                 )
 
                 if enable_position_sizing:
@@ -780,6 +1302,15 @@ if st.session_state.results:
         "recalculated for each historical day using that day's close, ATR, direction, and selected "
         "multiplier/regime settings."
     )
+    show_triggers = st.checkbox(
+        "Show entry-trigger markers",
+        value=True,
+        key=f"show_triggers_{selected}",
+        help=(
+            "Marks historical bars where trend alignment, location, and the RSI trigger all "
+            "fired for the selected direction. Context only, not trade signals."
+        ),
+    )
     chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
         subset=["Close", "Stop Price"]
     )
@@ -823,7 +1354,34 @@ if st.session_state.results:
         )
         .properties(height=360)
     )
-    st.altair_chart(price_chart, width="stretch")
+
+    chart_layers = price_chart
+    if show_triggers and "Entry_Trigger" in hist.columns:
+        trigger_points = (
+            hist[hist["Entry_Trigger"].fillna(False)]
+            .reset_index(names="Date")[["Date", "Close"]]
+            .dropna(subset=["Close"])
+        )
+        if not trigger_points.empty:
+            panel_direction = summary.get("direction", direction)
+            marker_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
+            marker_layer = (
+                alt.Chart(trigger_points)
+                .mark_point(shape=marker_shape, size=90, filled=True, color="#1a7f37", opacity=0.85)
+                .encode(
+                    x=alt.X("Date:T"),
+                    y=alt.Y("Close:Q"),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Trigger Date"),
+                        alt.Tooltip("Close:Q", title="Close", format=",.2f"),
+                    ],
+                )
+            )
+            chart_layers = alt.layer(price_chart, marker_layer)
+
+    st.altair_chart(chart_layers, width="stretch")
+
+    render_entry_panel(selected, hist, summary, selected_result)
 
     detail_cols = st.columns(4)
     detail_cols[0].metric(
