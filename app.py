@@ -1024,6 +1024,17 @@ def generate_stop_for_ticker(
     vol_summary["grade"] = grade_setup(vol_summary, strategy_type, direction)
     vol_summary["backtest"] = backtest_stats
 
+    # Default trade plan at the latest close (structure target) for the scanner/results
+    default_target = compute_target(
+        vol_summary["entry_price"], vol_summary["atr"], direction, strategy_type, df, "structure"
+    )
+    default_plan = build_trade_plan(
+        vol_summary["entry_price"],
+        float(stop["Stop Distance"]),
+        direction,
+        default_target["target_price"],
+    )
+
     stop.update(
         {
             "Entry Score": vol_summary["grade"]["score"],
@@ -1033,6 +1044,8 @@ def generate_stop_for_ticker(
             "RSI": round(vol_summary["rsi"], 1) if not pd.isna(vol_summary["rsi"]) else np.nan,
             "RSI State": vol_summary["rsi_state"],
             "Rel Strength": vol_summary["rs_read"],
+            "Target": default_plan["Target"],
+            "Reward:Risk": default_plan["Reward:Risk"],
             "Signal Win %": round(backtest_stats["win_rate"], 1)
             if not pd.isna(backtest_stats["win_rate"])
             else np.nan,
@@ -1256,6 +1269,73 @@ with st.expander("How this calculator works", expanded=False):
         """
     )
 
+with st.expander("User guide: find better entries and maximize reward vs. risk", expanded=False):
+    st.markdown(
+        """
+        This app helps with the full trade plan — **where to enter, where to exit, and how much
+        to risk** — while keeping you on the right side of reward vs. risk. Use it as a repeatable
+        workflow:
+
+        #### 1. Set your context (sidebar)
+        - **Tickers:** paste a watchlist (commas or new lines).
+        - **Trading strategy:** `Day` / `Swing` / `Trend` / `Position`. This sets stop width *and*
+          tunes the entry thresholds (pullback bands, target distance, RSI reset band, volume and
+          relative-strength expectations). Match it to how long you actually hold.
+        - **Direction:** long or short. Every entry signal flips accordingly.
+        - **Benchmark:** the index your relative-strength is measured against (`SPY` by default;
+          use `QQQ` for tech-heavy names).
+        - Leave the indicator/override defaults unless you have a reason to change them, then click
+          **Calculate Stops**.
+
+        #### 2. Triage with the Setup Scanner
+        The scanner ranks your whole watchlist by setup quality. Start at the top:
+        - Rank by **Entry Score** to find the highest-quality setups, or by **Reward:Risk** to find
+          the most asymmetric ones.
+        - Filter to **A/B grades** and set a **Min Reward:Risk** (e.g. 2.0) to hide weak ideas.
+        - Only the names that survive triage are worth a closer look.
+
+        #### 3. Drill into a candidate (Entry Panel)
+        Pick a ticker and read its **Entry Score (0-100) and grade**. The component table shows
+        *why*, factor by factor. The strongest setups usually line up like this:
+        - **Trend alignment:** price stacked with MA50/MA200 in your direction.
+        - **Location:** `At Support` or `Near` — a shallow pullback toward rising support beats
+          chasing an `Extended` move (location is measured in ATR units).
+        - **Trigger (RSI):** `Resetting Up` (longs) — momentum turning back your way, not an
+          exhausted chase at overbought.
+        - **Relative strength:** `Leader` or `Improving Laggard` vs. the benchmark.
+        - **Cost basis / volume:** price above VWAP (clean) and, for breakout strategies, a volume
+          surge confirming the move.
+
+        #### 4. Build the trade plan
+        - Set a **Planned entry** (the price you'd actually buy/short). The stop *distance* is
+          volatility-based and stays fixed; the stop price, risk %, and shares update.
+        - Choose a **target method** and read **Reward:Risk**. Favor setups offering at least your
+          strategy's target R (≈2R for trend/position). If R:R is below 1, the app warns you —
+          wait for a better entry or a closer support to lean on.
+
+        #### 5. Sanity-check with the signal replay
+        The backtest replays this ticker's historical triggers and reports **win rate, average R,
+        and expectancy**. Prefer setups with **positive expectancy**. Treat it as rough calibration
+        context — it ignores slippage, gaps, and overlapping trades, and the past is not a promise.
+
+        #### 6. Size and manage the risk
+        - Enable **position sizing** to convert your fixed risk-per-trade into a share count, so a
+          stop-out only costs your planned percentage of the account.
+        - The **stop price** and **Risk % to Stop** define your exit before you ever enter. Plan the
+          exit first; the entry only earns its place if the reward justifies that risk.
+
+        #### Quick checklist to maximize reward vs. risk
+        1. Trade *with* the trend and a leader in relative strength.
+        2. Enter near support on a resetting trigger — not extended, not chasing.
+        3. Require an asymmetric Reward:Risk (ideally ≥ 2R) before committing.
+        4. Confirm positive historical expectancy for that setup type.
+        5. Size by a fixed risk %, and let the predefined ATR stop manage the downside.
+
+        Everything here is educational decision support, not financial advice or a trade
+        recommendation.
+        """
+    )
+
 with st.sidebar:
     st.header("Inputs")
 
@@ -1463,6 +1543,78 @@ if run_button:
     close_mobile_sidebar()
 
 if st.session_state.results:
+    result_df = pd.DataFrame(st.session_state.results)
+
+    st.subheader("Setup Scanner")
+    st.caption(
+        "Ranks the tickers you entered by setup quality so you can focus on the best "
+        "reward-vs-risk opportunities first. Sort by Entry Score, Reward:Risk, historical "
+        "signal win rate, or tightest risk. Educational ranking only, not trade advice."
+    )
+
+    scan_controls = st.columns([2, 1, 1])
+    sort_options = {
+        "Entry Score": ("Entry Score", False),
+        "Reward:Risk": ("Reward:Risk", False),
+        "Signal Win %": ("Signal Win %", False),
+        "Signal Avg R": ("Signal Avg R", False),
+        "Risk % to Stop (tightest)": ("Risk % to Stop", True),
+    }
+    sort_choice = scan_controls[0].selectbox(
+        "Rank by",
+        options=list(sort_options.keys()),
+        index=0,
+        help="Choose the metric used to rank your watchlist.",
+    )
+    grade_filter = scan_controls[1].multiselect(
+        "Grades",
+        options=["A", "B", "C"],
+        default=["A", "B", "C"],
+        help="Show only setups with these grades.",
+    )
+    min_rr = scan_controls[2].number_input(
+        "Min Reward:Risk",
+        min_value=0.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.5,
+        help="Hide setups whose default Reward:Risk is below this value. 0 disables the filter.",
+    )
+
+    sort_col, ascending = sort_options[sort_choice]
+    scan_df = result_df.copy()
+    if "Setup Grade" in scan_df.columns and grade_filter:
+        scan_df = scan_df[scan_df["Setup Grade"].isin(grade_filter)]
+    if min_rr > 0 and "Reward:Risk" in scan_df.columns:
+        scan_df = scan_df[scan_df["Reward:Risk"].fillna(0) >= min_rr]
+
+    if scan_df.empty:
+        st.info("No setups match the current scanner filters.")
+    else:
+        if sort_col in scan_df.columns:
+            scan_df = scan_df.sort_values(
+                sort_col, ascending=ascending, na_position="last"
+            )
+        scanner_cols = [
+            c
+            for c in [
+                "Ticker", "Type", "Direction", "Setup Grade", "Entry Score",
+                "Reward:Risk", "Risk % to Stop", "Trend Alignment", "Location",
+                "RSI State", "Rel Strength", "Signal Win %", "Signal Avg R", "Regime",
+            ]
+            if c in scan_df.columns
+        ]
+        scan_df = scan_df[scanner_cols].reset_index(drop=True)
+        scan_df.insert(0, "Rank", range(1, len(scan_df) + 1))
+        st.dataframe(scan_df, width="stretch", hide_index=True)
+        top = scan_df.iloc[0]
+        st.caption(
+            f"Top setup by {sort_choice}: **{top['Ticker']}** "
+            f"(Grade {top.get('Setup Grade', 'n/a')}, "
+            f"Entry Score {top.get('Entry Score', 'n/a')}, "
+            f"Reward:Risk {top.get('Reward:Risk', 'n/a')})."
+        )
+
     st.subheader("Stop Results")
     st.caption(
         "Entry Price is the latest close. Stop Distance is ATR times the selected multiplier. "
@@ -1486,7 +1638,6 @@ if st.session_state.results:
             to estimate how many shares fit your selected risk budget.
             """
         )
-    result_df = pd.DataFrame(st.session_state.results)
     st.dataframe(result_df, width="stretch")
 
     csv = result_df.to_csv(index=False).encode("utf-8")
