@@ -272,9 +272,10 @@ df = df.join(spy_close, how="left")
 df["SPY_Close"] = df["SPY_Close"].ffill()
 df["RS_Ratio"] = df["Close"] / df["SPY_Close"]
 df["RS_Slope"] = df["RS_Ratio"].diff(21)        # 1-month change in RS line
-# 63-bar (~3-month) relative return, in percentage points
+# strategy-tuned relative-return lookback (ENTRY_CONFIG["rs_lookback"]), in pct points
+n = ENTRY_CONFIG[strategy_type]["rs_lookback"]
 df["RS_Return_Rel"] = (
-    df["Close"].pct_change(63) - df["SPY_Close"].pct_change(63)
+    df["Close"].pct_change(n) - df["SPY_Close"].pct_change(n)
 ) * 100
 ```
 
@@ -308,7 +309,7 @@ components table:
 | Good location | `Location_State in {"At Support", "Near"}` |
 | Clean cost basis | `CostBasis_Flag == "Clean"` |
 | Trigger firing | `RSI_State in {"Oversold", "Resetting Up"}` |
-| Volume confirms | `Vol_Confirm` is true *(only required for breakout-style strategies; otherwise neutral)* |
+| Volume confirms | `Vol_Confirm` is true *(gating only when `ENTRY_CONFIG[strategy]["vol_required"]`; otherwise neutral/confirming)* |
 | RS leadership | RS read `in {"Leader", "Improving Laggard"}` |
 
 Grade mapping (over the conditions that are *applicable* and *not N/A*):
@@ -348,17 +349,56 @@ and per-strategy:
 
 ```python
 ENTRY_CONFIG = {
-    #          location bands (ATR)     target          RSI reset   vol
-    #          support near  extended   N    atr_mult    lo   hi     mult
-    "day":      {"support":0.3,"near":1.0,"ext":2.0, "target_n":10,"reward_atr":2.0,"rsi_lo":40,"rsi_hi":60,"vol_mult":2.0},
-    "swing":    {"support":0.5,"near":1.5,"ext":3.0, "target_n":20,"reward_atr":3.0,"rsi_lo":35,"rsi_hi":55,"vol_mult":1.5},
-    "trend":    {"support":0.75,"near":2.0,"ext":4.0,"target_n":55,"reward_atr":5.0,"rsi_lo":40,"rsi_hi":60,"vol_mult":1.3},
-    "position": {"support":1.0,"near":3.0,"ext":5.0, "target_n":120,"reward_atr":6.0,"rsi_lo":40,"rsi_hi":60,"vol_mult":1.2},
+    "day":      {"support": 0.30, "near": 1.0, "ext": 2.0, "target_n": 10,
+                 "reward_atr": 2.0, "rsi_lo": 40, "rsi_hi": 60,
+                 "vol_mult": 2.0, "vol_required": True,  "rs_lookback": 21},
+    "swing":    {"support": 0.50, "near": 1.5, "ext": 3.0, "target_n": 20,
+                 "reward_atr": 3.0, "rsi_lo": 35, "rsi_hi": 55,
+                 "vol_mult": 1.5, "vol_required": False, "rs_lookback": 42},
+    "trend":    {"support": 0.75, "near": 2.0, "ext": 4.0, "target_n": 55,
+                 "reward_atr": 5.0, "rsi_lo": 40, "rsi_hi": 60,
+                 "vol_mult": 1.3, "vol_required": True,  "rs_lookback": 63},
+    "position": {"support": 1.00, "near": 3.0, "ext": 5.0, "target_n": 120,
+                 "reward_atr": 6.0, "rsi_lo": 40, "rsi_hi": 60,
+                 "vol_mult": 1.2, "vol_required": False, "rs_lookback": 126},
 }
 ```
 
-(Values above are sensible defaults to start from, not sacred — they are the knobs a
-later backtest phase would calibrate.)
+**Field reference**
+
+| Field | Meaning | Used by |
+|---|---|---|
+| `support` / `near` / `ext` | Location bands in ATR units of distance from MA50 (direction-aware) | §2.3 `Location_State` |
+| `target_n` | Lookback (bars) for the structure swing-extreme target | §2.6 `compute_target` |
+| `reward_atr` | Fallback ATR-multiple target when no usable structure level | §2.6 `compute_target` |
+| `rsi_lo` / `rsi_hi` | "Reset" band for the RSI trigger | §3.3 `RSI_State` |
+| `vol_mult` | Relative-volume threshold for `Vol_Confirm` | §3.1 / §3.5 |
+| `vol_required` | Whether volume *gates* the grade (breakout strategies) vs. merely confirms | §3.5 `grade_setup` |
+| `rs_lookback` | Relative-return window (bars) vs. benchmark | §3.4 `add_relative_strength` |
+
+**Rationale for these defaults**
+
+- **Bands scale with the strategy's own stop width.** Stops are already horizon-scaled
+  via `ATR_MULTIPLIERS` (Normal regime: day ≈1.25 ATR, swing 2.0, trend 2.5, position
+  3.0). Location bands widen in the same proportion, and `ext` sits near/just past the
+  stop multiple so "Extended" means price has run roughly a full stop's worth past
+  support. A position trade (3-ATR stop) shouldn't flag a 2-ATR pullback as chasing.
+- **Targets give an escalating, sensible R:R.** Using the `reward_atr` fallback against
+  the Normal-regime stop: day 2.0/1.25 ≈ **1.6R**, swing 3.0/2.0 ≈ **1.5R**,
+  trend 5.0/2.5 ≈ **2.0R**, position 6.0/3.0 ≈ **2.0R**. Shorter horizons accept ~1.5R;
+  longer horizons demand ~2R to justify holding through more noise. The structure
+  target overrides this whenever a real swing level is closer/farther.
+- **`target_n` matches typical visibility/hold:** day 10, swing 20, trend 55 (classic
+  Donchian breakout level), position 120 (~6 months).
+- **RSI reset band:** swing uses the tightest classic-pullback window (35–55); others
+  use 40–60. Below `rsi_lo` = oversold; above `rsi_hi` = caution for new longs.
+- **Volume:** required and strong for breakout-style entries (day 2.0×, trend 1.3×);
+  lower and merely confirming for pullback-style entries (swing 1.5×, position 1.2×).
+- **`rs_lookback` matches the holding horizon** (day 21 → position 126 bars) so a
+  short-horizon setup isn't graded on multi-month leadership.
+
+(These are calibrated starting points, not sacred — they are exactly the knobs the
+deferred backtest phase, §7, would tune against historical hit-rate / R.)
 
 Per-strategy entry archetype emphasis (drives which conditions are "required" vs.
 "neutral" in §3.5):
