@@ -196,7 +196,7 @@ def add_entry_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_relative_strength(df: pd.DataFrame, benchmark: str = BENCHMARK) -> pd.DataFrame:
     """Join a benchmark series and compute the relative-strength line and slope."""
-    bench = download_price_history(benchmark, period="1y")
+    bench = download_price_history(benchmark, period="2y")
     if not bench.empty:
         bench_close = bench[["Close"]].rename(columns={"Close": "BENCH_Close"})
         df = df.join(bench_close, how="left")
@@ -704,7 +704,9 @@ def calculate_volatility_indicators(
     use_vix: bool = True,
     benchmark: str = BENCHMARK,
 ) -> Tuple[pd.DataFrame, dict]:
-    df = download_price_history(ticker, period="1y")
+    # Fetch ~2 years so the 200-day MA has a full 200-bar lead-in before the most
+    # recent ~1 year, letting both MA50 and MA200 render across the whole chart view.
+    df = download_price_history(ticker, period="2y")
     min_required_rows = max(atr_window, regime_window, bb_window, 200) + MIN_HISTORY_BUFFER
 
     if df.empty or len(df) < min_required_rows:
@@ -748,7 +750,7 @@ def calculate_volatility_indicators(
 
     # VIX macro regime
     if use_vix:
-        vix = download_price_history("^VIX", period="1y")
+        vix = download_price_history("^VIX", period="2y")
         if not vix.empty:
             vix_close = vix[["Close"]].rename(columns={"Close": "VIX"})
             df = df.join(vix_close, how="left")
@@ -1487,6 +1489,13 @@ def render_ticker_detail(
     chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
         subset=["Close", "Stop Price"]
     )
+    # Start the visible window where the longest MA first has a value so MA50 and MA200
+    # both span the entire chart instead of starting partway in and looking cut off.
+    if chart_df["MA200"].notna().any():
+        chart_df = chart_df.loc[chart_df["MA200"].first_valid_index():]
+    elif chart_df["MA50"].notna().any():
+        chart_df = chart_df.loc[chart_df["MA50"].first_valid_index():]
+    visible_start = chart_df.index.min() if not chart_df.empty else None
     chart_df["Risk % to Stop"] = (chart_df["Stop Distance"] / chart_df["Close"]) * 100
     chart_df["Tooltip Close"] = chart_df["Close"]
     chart_df["Tooltip MA50"] = chart_df["MA50"]
@@ -1532,8 +1541,11 @@ def render_ticker_detail(
     if show_triggers and "Entry_Trigger" in hist.columns:
         has_outcome = "Trigger_Outcome" in hist.columns
         marker_cols = ["Close"] + (["Trigger_Outcome", "Trigger_R"] if has_outcome else [])
+        trigger_mask = hist["Entry_Trigger"].fillna(False)
+        if visible_start is not None:
+            trigger_mask = trigger_mask & (hist.index >= visible_start)
         trigger_points = (
-            hist[hist["Entry_Trigger"].fillna(False)]
+            hist[trigger_mask]
             .reset_index(names="Date")[["Date"] + marker_cols]
             .dropna(subset=["Close"])
         )
