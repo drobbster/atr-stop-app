@@ -1241,20 +1241,9 @@ def render_entry_panel(
         )
 
 
-# =========================
-# Streamlit UI
-# =========================
-
-st.set_page_config(
-    page_title="ATR Stop Calculator",
-    page_icon="",
-    layout="wide",
-)
-
-st.title("ATR Stop Calculator")
-st.caption("Regime-aware ATR stop-loss calculator for stocks and ETFs.")
-
-with st.expander("How this calculator works", expanded=False):
+def render_help_reference() -> None:
+    """Consolidated guides and reference tables, kept out of the working views."""
+    st.subheader("How this calculator works")
     st.markdown(
         """
         This app estimates a stop-loss price by multiplying a ticker's Average True Range (ATR)
@@ -1269,72 +1258,431 @@ with st.expander("How this calculator works", expanded=False):
         """
     )
 
-with st.expander("User guide: find better entries and maximize reward vs. risk", expanded=False):
+    st.subheader("ATR multiplier table")
+    st.caption(
+        "The app uses this table unless you choose a custom ATR multiplier. "
+        "Higher multipliers create wider stops."
+    )
+    multiplier_table = pd.DataFrame(ATR_MULTIPLIERS).T
+    multiplier_table.index = [STRATEGY_LABELS[idx] for idx in multiplier_table.index]
+    st.dataframe(multiplier_table, width="stretch")
+
+    st.subheader("What does Risk % to Stop mean?")
     st.markdown(
         """
-        This app helps with the full trade plan — **where to enter, where to exit, and how much
-        to risk** — while keeping you on the right side of reward vs. risk. Use it as a repeatable
-        workflow:
+        **Risk % to Stop** answers: _How far can this position move against me before my stop
+        is hit?_
 
-        #### 1. Set your context (sidebar)
-        - **Tickers:** paste a watchlist (commas or new lines).
-        - **Trading strategy:** `Day` / `Swing` / `Trend` / `Position`. This sets stop width *and*
-          tunes the entry thresholds (pullback bands, target distance, RSI reset band, volume and
-          relative-strength expectations). Match it to how long you actually hold.
-        - **Direction:** long or short. Every entry signal flips accordingly.
-        - **Benchmark:** the index your relative-strength is measured against (`SPY` by default;
-          use `QQQ` for tech-heavy names).
-        - Leave the indicator/override defaults unless you have a reason to change them, then click
-          **Calculate Stops**.
+        For a long trade, it is the percentage drop from entry to stop. For a short trade,
+        it is the percentage rise from entry to stop. A larger value means the position has
+        more room to move before the stop is hit, but each share carries more price risk.
 
-        #### 2. Triage with the Setup Scanner
-        The scanner ranks your whole watchlist by setup quality. Start at the top:
-        - Rank by **Entry Score** to find the highest-quality setups, or by **Reward:Risk** to find
-          the most asymmetric ones.
-        - Filter to **A/B grades** and set a **Min Reward:Risk** (e.g. 2.0) to hide weak ideas.
-        - Only the names that survive triage are worth a closer look.
-
-        #### 3. Drill into a candidate (Entry Panel)
-        Pick a ticker and read its **Entry Score (0-100) and grade**. The component table shows
-        *why*, factor by factor. The strongest setups usually line up like this:
-        - **Trend alignment:** price stacked with MA50/MA200 in your direction.
-        - **Location:** `At Support` or `Near` — a shallow pullback toward rising support beats
-          chasing an `Extended` move (location is measured in ATR units).
-        - **Trigger (RSI):** `Resetting Up` (longs) — momentum turning back your way, not an
-          exhausted chase at overbought.
-        - **Relative strength:** `Leader` or `Improving Laggard` vs. the benchmark.
-        - **Cost basis / volume:** price above VWAP (clean) and, for breakout strategies, a volume
-          surge confirming the move.
-
-        #### 4. Build the trade plan
-        - Set a **Planned entry** (the price you'd actually buy/short). The stop *distance* is
-          volatility-based and stays fixed; the stop price, risk %, and shares update.
-        - Choose a **target method** and read **Reward:Risk**. Favor setups offering at least your
-          strategy's target R (≈2R for trend/position). If R:R is below 1, the app warns you —
-          wait for a better entry or a closer support to lean on.
-
-        #### 5. Sanity-check with the signal replay
-        The backtest replays this ticker's historical triggers and reports **win rate, average R,
-        and expectancy**. Prefer setups with **positive expectancy**. Treat it as rough calibration
-        context — it ignores slippage, gaps, and overlapping trades, and the past is not a promise.
-
-        #### 6. Size and manage the risk
-        - Enable **position sizing** to convert your fixed risk-per-trade into a share count, so a
-          stop-out only costs your planned percentage of the account.
-        - The **stop price** and **Risk % to Stop** define your exit before you ever enter. Plan the
-          exit first; the entry only earns its place if the reward justifies that risk.
-
-        #### Quick checklist to maximize reward vs. risk
-        1. Trade *with* the trend and a leader in relative strength.
-        2. Enter near support on a resetting trigger — not extended, not chasing.
-        3. Require an asymmetric Reward:Risk (ideally ≥ 2R) before committing.
-        4. Confirm positive historical expectancy for that setup type.
-        5. Size by a fixed risk %, and let the predefined ATR stop manage the downside.
-
-        Everything here is educational decision support, not financial advice or a trade
-        recommendation.
+        Example: if entry is `$100` and the stop is `$92`, the stop is `$8` away, so
+        Risk % to Stop is `8%`. With position sizing enabled, the app uses that stop distance
+        to estimate how many shares fit your selected risk budget.
         """
     )
+
+    st.subheader("How to use the trend and VWAP metrics")
+    st.markdown(
+        """
+        **Trend Strength** shows whether price is above or below the 50-day moving average.
+        **Long-Term Trend** does the same against the 200-day moving average. Positive values
+        confirm price is above those trend lines; very large positive values can also mean the
+        move is extended.
+
+        **VWAP Strength** compares price with the 50-day volume-weighted average price, which
+        is a rough view of recent volume-weighted cost basis. If price is above both MA50 and
+        VWAP50, trend and recent buyer cost basis are confirming each other. If price is above
+        MA50 but below VWAP50, the simple trend may look constructive, but recent high-volume
+        buyers may still be underwater, which can create overhead supply.
+
+        Use these as context with ATR and Risk % to Stop: a strong trend with a reasonable
+        stop distance is usually cleaner than a strong-looking trend that is very extended or
+        sitting below its volume-weighted cost basis.
+        """
+    )
+
+    with st.expander(
+        "Full user guide: find better entries and maximize reward vs. risk", expanded=False
+    ):
+        st.markdown(
+            """
+            This app helps with the full trade plan — **where to enter, where to exit, and how much
+            to risk** — while keeping you on the right side of reward vs. risk. Use it as a repeatable
+            workflow:
+
+            #### 1. Set your context (sidebar)
+            - **Tickers:** paste a watchlist (commas or new lines).
+            - **Trading strategy:** `Day` / `Swing` / `Trend` / `Position`. This sets stop width *and*
+              tunes the entry thresholds (pullback bands, target distance, RSI reset band, volume and
+              relative-strength expectations). Match it to how long you actually hold.
+            - **Direction:** long or short. Every entry signal flips accordingly.
+            - **Benchmark:** the index your relative-strength is measured against (`SPY` by default;
+              use `QQQ` for tech-heavy names).
+            - Leave the indicator/override defaults unless you have a reason to change them, then click
+              **Calculate Stops**.
+
+            #### 2. Triage with the Setup Scanner
+            The scanner ranks your whole watchlist by setup quality. Start at the top:
+            - Rank by **Entry Score** to find the highest-quality setups, or by **Reward:Risk** to find
+              the most asymmetric ones.
+            - Filter to **A/B grades** and set a **Min Reward:Risk** (e.g. 2.0) to hide weak ideas.
+            - Only the names that survive triage are worth a closer look.
+
+            #### 3. Drill into a candidate (Entry Plan)
+            Pick a ticker and read its **Entry Score (0-100) and grade**. The component table shows
+            *why*, factor by factor. The strongest setups usually line up like this:
+            - **Trend alignment:** price stacked with MA50/MA200 in your direction.
+            - **Location:** `At Support` or `Near` — a shallow pullback toward rising support beats
+              chasing an `Extended` move (location is measured in ATR units).
+            - **Trigger (RSI):** `Resetting Up` (longs) — momentum turning back your way, not an
+              exhausted chase at overbought.
+            - **Relative strength:** `Leader` or `Improving Laggard` vs. the benchmark.
+            - **Cost basis / volume:** price above VWAP (clean) and, for breakout strategies, a volume
+              surge confirming the move.
+
+            #### 4. Build the trade plan
+            - Set a **Planned entry** (the price you'd actually buy/short). The stop *distance* is
+              volatility-based and stays fixed; the stop price, risk %, and shares update.
+            - Choose a **target method** and read **Reward:Risk**. Favor setups offering at least your
+              strategy's target R (≈2R for trend/position). If R:R is below 1, the app warns you —
+              wait for a better entry or a closer support to lean on.
+
+            #### 5. Sanity-check with the signal replay
+            The backtest replays this ticker's historical triggers and reports **win rate, average R,
+            and expectancy**. Prefer setups with **positive expectancy**. Treat it as rough calibration
+            context — it ignores slippage, gaps, and overlapping trades, and the past is not a promise.
+
+            #### 6. Size and manage the risk
+            - Enable **position sizing** to convert your fixed risk-per-trade into a share count, so a
+              stop-out only costs your planned percentage of the account.
+            - The **stop price** and **Risk % to Stop** define your exit before you ever enter. Plan the
+              exit first; the entry only earns its place if the reward justifies that risk.
+
+            #### Quick checklist to maximize reward vs. risk
+            1. Trade *with* the trend and a leader in relative strength.
+            2. Enter near support on a resetting trigger — not extended, not chasing.
+            3. Require an asymmetric Reward:Risk (ideally ≥ 2R) before committing.
+            4. Confirm positive historical expectancy for that setup type.
+            5. Size by a fixed risk %, and let the predefined ATR stop manage the downside.
+
+            Everything here is educational decision support, not financial advice or a trade
+            recommendation.
+            """
+        )
+
+
+def render_scanner(result_df: pd.DataFrame) -> None:
+    """Render the watchlist Setup Scanner plus the full results table and CSV export."""
+    st.subheader("Setup Scanner")
+    st.caption(
+        "Ranks your watchlist by setup quality so you can focus on the best reward-vs-risk "
+        "ideas first. Educational ranking only, not trade advice."
+    )
+
+    scan_controls = st.columns([2, 1, 1])
+    sort_options = {
+        "Entry Score": ("Entry Score", False),
+        "Reward:Risk": ("Reward:Risk", False),
+        "Signal Win %": ("Signal Win %", False),
+        "Signal Avg R": ("Signal Avg R", False),
+        "Risk % to Stop (tightest)": ("Risk % to Stop", True),
+    }
+    sort_choice = scan_controls[0].selectbox(
+        "Rank by",
+        options=list(sort_options.keys()),
+        index=0,
+        help="Choose the metric used to rank your watchlist.",
+    )
+    grade_filter = scan_controls[1].multiselect(
+        "Grades",
+        options=["A", "B", "C"],
+        default=["A", "B", "C"],
+        help="Show only setups with these grades.",
+    )
+    min_rr = scan_controls[2].number_input(
+        "Min Reward:Risk",
+        min_value=0.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.5,
+        help="Hide setups whose default Reward:Risk is below this value. 0 disables the filter.",
+    )
+
+    sort_col, ascending = sort_options[sort_choice]
+    scan_df = result_df.copy()
+    if "Setup Grade" in scan_df.columns and grade_filter:
+        scan_df = scan_df[scan_df["Setup Grade"].isin(grade_filter)]
+    if min_rr > 0 and "Reward:Risk" in scan_df.columns:
+        scan_df = scan_df[scan_df["Reward:Risk"].fillna(0) >= min_rr]
+
+    if scan_df.empty:
+        st.info("No setups match the current scanner filters.")
+    else:
+        if sort_col in scan_df.columns:
+            scan_df = scan_df.sort_values(sort_col, ascending=ascending, na_position="last")
+        scanner_cols = [
+            c
+            for c in [
+                "Ticker", "Type", "Direction", "Setup Grade", "Entry Score",
+                "Reward:Risk", "Risk % to Stop", "Trend Alignment", "Location",
+                "RSI State", "Rel Strength", "Signal Win %", "Signal Avg R", "Regime",
+            ]
+            if c in scan_df.columns
+        ]
+        scan_df = scan_df[scanner_cols].reset_index(drop=True)
+        scan_df.insert(0, "Rank", range(1, len(scan_df) + 1))
+        st.dataframe(scan_df, width="stretch", hide_index=True)
+        top = scan_df.iloc[0]
+        st.caption(
+            f"Top setup by {sort_choice}: **{top['Ticker']}** "
+            f"(Grade {top.get('Setup Grade', 'n/a')}, "
+            f"Entry Score {top.get('Entry Score', 'n/a')}, "
+            f"Reward:Risk {top.get('Reward:Risk', 'n/a')})."
+        )
+
+    with st.expander("Full results table (all columns) and CSV export", expanded=False):
+        st.dataframe(result_df, width="stretch")
+        csv = result_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download CSV",
+            data=csv,
+            file_name="atr_stop_results.csv",
+            mime="text/csv",
+        )
+
+
+def render_ticker_detail(
+    result_df: pd.DataFrame,
+    available_tickers: List[str],
+    direction: str,
+) -> Tuple[str, pd.DataFrame, dict, pd.Series]:
+    """Render the per-ticker chart and grouped Stop/Trend/Regime metrics."""
+    selected = st.selectbox(
+        "Ticker",
+        options=available_tickers,
+        key="selected_ticker",
+        help="Switch between the tickers from the latest calculation without rerunning the data fetch.",
+    )
+
+    hist = st.session_state.history_by_ticker[selected].copy()
+    summary = st.session_state.summaries_by_ticker[selected]
+    selected_result = result_df[result_df["Ticker"] == selected].iloc[0]
+
+    st.subheader(f"{selected} price, moving averages, and stop")
+    st.caption(
+        "MA50 and MA200 give trend context; the stop-price line is recalculated for each "
+        "historical day from that day's close, ATR, direction, and settings."
+    )
+    show_triggers = st.checkbox(
+        "Show entry-trigger markers",
+        value=True,
+        key=f"show_triggers_{selected}",
+        help=(
+            "Marks historical bars where trend alignment, location, and the RSI trigger all "
+            "fired for the selected direction. Context only, not trade signals."
+        ),
+    )
+    chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
+        subset=["Close", "Stop Price"]
+    )
+    chart_df["Risk % to Stop"] = (chart_df["Stop Distance"] / chart_df["Close"]) * 100
+    chart_df["Tooltip Close"] = chart_df["Close"]
+    chart_df["Tooltip MA50"] = chart_df["MA50"]
+    chart_df["Tooltip MA200"] = chart_df["MA200"]
+    chart_df["Tooltip Stop Price"] = chart_df["Stop Price"]
+    chart_data = (
+        chart_df.reset_index(names="Date")
+        .melt(
+            id_vars=[
+                "Date",
+                "Tooltip Close",
+                "Tooltip MA50",
+                "Tooltip MA200",
+                "Tooltip Stop Price",
+                "Risk % to Stop",
+            ],
+            value_vars=["Close", "MA50", "MA200", "Stop Price"],
+            var_name="Series",
+            value_name="Price",
+        )
+        .dropna(subset=["Price"])
+    )
+    price_chart = (
+        alt.Chart(chart_data)
+        .mark_line()
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Price:Q", title="Price"),
+            color=alt.Color("Series:N", title="Series"),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Tooltip Close:Q", title="Close", format=",.2f"),
+                alt.Tooltip("Tooltip MA50:Q", title="MA50", format=",.2f"),
+                alt.Tooltip("Tooltip MA200:Q", title="MA200", format=",.2f"),
+                alt.Tooltip("Tooltip Stop Price:Q", title="Stop Price", format=",.2f"),
+                alt.Tooltip("Risk % to Stop:Q", title="Risk % to Stop", format=".2f"),
+            ],
+        )
+        .properties(height=360)
+    )
+
+    chart_layers = price_chart
+    if show_triggers and "Entry_Trigger" in hist.columns:
+        has_outcome = "Trigger_Outcome" in hist.columns
+        marker_cols = ["Close"] + (["Trigger_Outcome", "Trigger_R"] if has_outcome else [])
+        trigger_points = (
+            hist[hist["Entry_Trigger"].fillna(False)]
+            .reset_index(names="Date")[["Date"] + marker_cols]
+            .dropna(subset=["Close"])
+        )
+        if not trigger_points.empty:
+            panel_direction = summary.get("direction", direction)
+            marker_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
+            tooltip = [
+                alt.Tooltip("Date:T", title="Trigger Date"),
+                alt.Tooltip("Close:Q", title="Close", format=",.2f"),
+            ]
+            if has_outcome:
+                trigger_points["Trigger_Outcome"] = trigger_points["Trigger_Outcome"].replace(
+                    "", "Open"
+                )
+                tooltip += [
+                    alt.Tooltip("Trigger_Outcome:N", title="Outcome"),
+                    alt.Tooltip("Trigger_R:Q", title="Realized R", format="+.2f"),
+                ]
+                color_enc = alt.Color(
+                    "Trigger_Outcome:N",
+                    title="Trigger outcome",
+                    scale=alt.Scale(
+                        domain=["Win", "Loss", "Open"],
+                        range=["#1a7f37", "#c1121f", "#6e7781"],
+                    ),
+                )
+            else:
+                color_enc = alt.value("#1a7f37")
+
+            marker_layer = (
+                alt.Chart(trigger_points)
+                .mark_point(shape=marker_shape, size=90, filled=True, opacity=0.85)
+                .encode(
+                    x=alt.X("Date:T"),
+                    y=alt.Y("Close:Q"),
+                    color=color_enc,
+                    tooltip=tooltip,
+                )
+            )
+            chart_layers = alt.layer(price_chart, marker_layer)
+
+    st.altair_chart(chart_layers, width="stretch")
+
+    st.subheader("Stop & risk")
+    risk_cols = st.columns(3)
+    risk_cols[0].metric(
+        "Stop Price",
+        f"${selected_result['Stop Price']:.2f}",
+        help="Calculated stop price for the selected ticker.",
+    )
+    risk_cols[1].metric(
+        "Stop Distance",
+        f"${selected_result['Stop Distance']:.2f}",
+        help="Dollar distance between entry price and stop price.",
+    )
+    risk_cols[2].metric(
+        "Risk % to Stop",
+        f"{selected_result['Risk % to Stop']:.2f}%",
+        help="How far this position can move against you before the stop is hit.",
+    )
+
+    st.subheader("Trend context")
+    trend_cols = st.columns(3)
+    trend_cols[0].metric(
+        "Trend Strength",
+        f"{summary['trend_strength']:.2f}%" if not pd.isna(summary["trend_strength"]) else "N/A",
+        help="Current close compared with the 50-day moving average.",
+    )
+    trend_cols[1].metric(
+        "Long-Term Trend",
+        f"{summary['long_term_trend']:.2f}%" if not pd.isna(summary["long_term_trend"]) else "N/A",
+        help="Current close compared with the 200-day moving average.",
+    )
+    trend_cols[2].metric(
+        "VWAP Strength",
+        f"{summary['vwap_strength']:.2f}%" if not pd.isna(summary["vwap_strength"]) else "N/A",
+        help=(
+            "Current close compared with the 50-day volume-weighted average price. "
+            "Positive means price is above the recent volume-weighted cost basis."
+        ),
+    )
+
+    st.subheader("Volatility regime")
+    detail_cols = st.columns(4)
+    detail_cols[0].metric(
+        "Latest Close",
+        f"${summary['entry_price']:.2f}",
+        help="Most recent close from Yahoo Finance daily data.",
+    )
+    detail_cols[1].metric(
+        "ATR",
+        f"${summary['atr']:.2f}",
+        help="Average True Range, a dollar estimate of recent daily price movement.",
+    )
+    detail_cols[2].metric(
+        "Combined Regime",
+        summary["volatility_regime"],
+        help="Low, Normal, or High volatility classification from the combined regime score.",
+    )
+    detail_cols[3].metric(
+        "Regime Score",
+        f"{summary['regime_score']:.2f}",
+        help="Average of ATR, Bollinger width, and VIX regime scores. Higher means more volatility.",
+    )
+    st.caption(
+        "Ratios compare the current reading with its recent average. Low is below 0.75, "
+        "High is above 1.50, and Normal is between those levels."
+    )
+    regime_detail = pd.DataFrame(
+        [
+            {
+                "Signal": "ATR Ratio",
+                "Value": round(summary["atr_ratio"], 3) if not pd.isna(summary["atr_ratio"]) else np.nan,
+                "Regime": summary["atr_regime"],
+            },
+            {
+                "Signal": "Bollinger Width Ratio",
+                "Value": round(summary["bb_ratio"], 3) if not pd.isna(summary["bb_ratio"]) else np.nan,
+                "Regime": summary["bb_regime"],
+            },
+            {
+                "Signal": "VIX Ratio",
+                "Value": round(summary["vix_ratio"], 3) if not pd.isna(summary["vix_ratio"]) else np.nan,
+                "Regime": summary["vix_regime"],
+            },
+        ]
+    )
+    st.dataframe(regime_detail, width="stretch")
+
+    return selected, hist, summary, selected_result
+
+
+# =========================
+# Streamlit UI
+# =========================
+
+st.set_page_config(
+    page_title="ATR Stop Calculator",
+    page_icon="",
+    layout="wide",
+)
+
+st.title("ATR Stop Calculator")
+st.caption("Regime-aware ATR stop-loss calculator for stocks and ETFs.")
+st.markdown(
+    "Enter a watchlist in the sidebar and click **Calculate Stops**. "
+    "Results open in tabs: **Scanner** to triage, **Ticker Detail** for the chart and stop, "
+    "**Entry Plan** for the deeper setup, and **Help & Reference** for the guide."
+)
 
 with st.sidebar:
     st.header("Inputs")
@@ -1470,17 +1818,6 @@ with st.sidebar:
     run_button = st.button("Calculate Stops", type="primary")
 
 
-st.subheader("ATR Multiplier Table")
-st.caption(
-    "The app uses this table unless you choose a custom ATR multiplier. "
-    "Higher multipliers create wider stops."
-)
-
-multiplier_table = pd.DataFrame(ATR_MULTIPLIERS).T
-multiplier_table.index = [STRATEGY_LABELS[idx] for idx in multiplier_table.index]
-st.dataframe(multiplier_table, width="stretch")
-
-
 for key, initial_value in {
     "results": [],
     "history_by_ticker": {},
@@ -1544,338 +1881,38 @@ if run_button:
 
 if st.session_state.results:
     result_df = pd.DataFrame(st.session_state.results)
-
-    st.subheader("Setup Scanner")
-    st.caption(
-        "Ranks the tickers you entered by setup quality so you can focus on the best "
-        "reward-vs-risk opportunities first. Sort by Entry Score, Reward:Risk, historical "
-        "signal win rate, or tightest risk. Educational ranking only, not trade advice."
-    )
-
-    scan_controls = st.columns([2, 1, 1])
-    sort_options = {
-        "Entry Score": ("Entry Score", False),
-        "Reward:Risk": ("Reward:Risk", False),
-        "Signal Win %": ("Signal Win %", False),
-        "Signal Avg R": ("Signal Avg R", False),
-        "Risk % to Stop (tightest)": ("Risk % to Stop", True),
-    }
-    sort_choice = scan_controls[0].selectbox(
-        "Rank by",
-        options=list(sort_options.keys()),
-        index=0,
-        help="Choose the metric used to rank your watchlist.",
-    )
-    grade_filter = scan_controls[1].multiselect(
-        "Grades",
-        options=["A", "B", "C"],
-        default=["A", "B", "C"],
-        help="Show only setups with these grades.",
-    )
-    min_rr = scan_controls[2].number_input(
-        "Min Reward:Risk",
-        min_value=0.0,
-        max_value=10.0,
-        value=0.0,
-        step=0.5,
-        help="Hide setups whose default Reward:Risk is below this value. 0 disables the filter.",
-    )
-
-    sort_col, ascending = sort_options[sort_choice]
-    scan_df = result_df.copy()
-    if "Setup Grade" in scan_df.columns and grade_filter:
-        scan_df = scan_df[scan_df["Setup Grade"].isin(grade_filter)]
-    if min_rr > 0 and "Reward:Risk" in scan_df.columns:
-        scan_df = scan_df[scan_df["Reward:Risk"].fillna(0) >= min_rr]
-
-    if scan_df.empty:
-        st.info("No setups match the current scanner filters.")
-    else:
-        if sort_col in scan_df.columns:
-            scan_df = scan_df.sort_values(
-                sort_col, ascending=ascending, na_position="last"
-            )
-        scanner_cols = [
-            c
-            for c in [
-                "Ticker", "Type", "Direction", "Setup Grade", "Entry Score",
-                "Reward:Risk", "Risk % to Stop", "Trend Alignment", "Location",
-                "RSI State", "Rel Strength", "Signal Win %", "Signal Avg R", "Regime",
-            ]
-            if c in scan_df.columns
-        ]
-        scan_df = scan_df[scanner_cols].reset_index(drop=True)
-        scan_df.insert(0, "Rank", range(1, len(scan_df) + 1))
-        st.dataframe(scan_df, width="stretch", hide_index=True)
-        top = scan_df.iloc[0]
-        st.caption(
-            f"Top setup by {sort_choice}: **{top['Ticker']}** "
-            f"(Grade {top.get('Setup Grade', 'n/a')}, "
-            f"Entry Score {top.get('Entry Score', 'n/a')}, "
-            f"Reward:Risk {top.get('Reward:Risk', 'n/a')})."
-        )
-
-    st.subheader("Stop Results")
-    st.caption(
-        "Entry Price is the latest close. Stop Distance is ATR times the selected multiplier. "
-        "Stop Price is Entry Price minus Stop Distance for longs, or plus Stop Distance for shorts. "
-        "Risk % to Stop answers: how far can this position move against me before my stop is hit? "
-        "Trend Strength, Long-Term Trend, and VWAP Strength show percent above or below MA50, "
-        "MA200, and VWAP50."
-    )
-    with st.expander("What does Risk % to Stop mean?", expanded=False):
-        st.markdown(
-            """
-            **Risk % to Stop** answers: _How far can this position move against me before my stop
-            is hit?_
-
-            For a long trade, it is the percentage drop from entry to stop. For a short trade,
-            it is the percentage rise from entry to stop. A larger value means the position has
-            more room to move before the stop is hit, but each share carries more price risk.
-
-            Example: if entry is `$100` and the stop is `$92`, the stop is `$8` away, so
-            Risk % to Stop is `8%`. With position sizing enabled, the app uses that stop distance
-            to estimate how many shares fit your selected risk budget.
-            """
-        )
-    st.dataframe(result_df, width="stretch")
-
-    csv = result_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download CSV",
-        data=csv,
-        file_name="atr_stop_results.csv",
-        mime="text/csv",
-    )
-
     available_tickers = list(st.session_state.history_by_ticker.keys())
     if st.session_state.get("selected_ticker") not in available_tickers:
         st.session_state.selected_ticker = available_tickers[0]
 
-    selected = st.selectbox(
-        "View chart/details for ticker",
-        options=available_tickers,
-        key="selected_ticker",
-        help="Switch between the tickers from the latest calculation without rerunning the data fetch.",
-    )
+    multiple = len(available_tickers) > 1
 
-    hist = st.session_state.history_by_ticker[selected].copy()
-    summary = st.session_state.summaries_by_ticker[selected]
-    selected_result = result_df[result_df["Ticker"] == selected].iloc[0]
-
-    st.subheader(f"{selected} Close, Moving Averages, and Stop Price")
-    st.caption(
-        "MA50 and MA200 show intermediate and long-term trend context. The stop-price line is "
-        "recalculated for each historical day using that day's close, ATR, direction, and selected "
-        "multiplier/regime settings."
-    )
-    show_triggers = st.checkbox(
-        "Show entry-trigger markers",
-        value=True,
-        key=f"show_triggers_{selected}",
-        help=(
-            "Marks historical bars where trend alignment, location, and the RSI trigger all "
-            "fired for the selected direction. Context only, not trade signals."
-        ),
-    )
-    chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
-        subset=["Close", "Stop Price"]
-    )
-    chart_df["Risk % to Stop"] = (chart_df["Stop Distance"] / chart_df["Close"]) * 100
-    chart_df["Tooltip Close"] = chart_df["Close"]
-    chart_df["Tooltip MA50"] = chart_df["MA50"]
-    chart_df["Tooltip MA200"] = chart_df["MA200"]
-    chart_df["Tooltip Stop Price"] = chart_df["Stop Price"]
-    chart_data = (
-        chart_df.reset_index(names="Date")
-        .melt(
-            id_vars=[
-                "Date",
-                "Tooltip Close",
-                "Tooltip MA50",
-                "Tooltip MA200",
-                "Tooltip Stop Price",
-                "Risk % to Stop",
-            ],
-            value_vars=["Close", "MA50", "MA200", "Stop Price"],
-            var_name="Series",
-            value_name="Price",
+    # With several tickers, lead with the Scanner for triage. With a single ticker the
+    # scanner is redundant, so land on Ticker Detail and push the scanner to the end.
+    if multiple:
+        scanner_tab, detail_tab, entry_tab, help_tab = st.tabs(
+            ["Scanner", "Ticker Detail", "Entry Plan", "Help & Reference"]
         )
-        .dropna(subset=["Price"])
-    )
-    price_chart = (
-        alt.Chart(chart_data)
-        .mark_line()
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y("Price:Q", title="Price"),
-            color=alt.Color("Series:N", title="Series"),
-            tooltip=[
-                alt.Tooltip("Date:T", title="Date"),
-                alt.Tooltip("Tooltip Close:Q", title="Close", format=",.2f"),
-                alt.Tooltip("Tooltip MA50:Q", title="MA50", format=",.2f"),
-                alt.Tooltip("Tooltip MA200:Q", title="MA200", format=",.2f"),
-                alt.Tooltip("Tooltip Stop Price:Q", title="Stop Price", format=",.2f"),
-                alt.Tooltip("Risk % to Stop:Q", title="Risk % to Stop", format=".2f"),
-            ],
-        )
-        .properties(height=360)
-    )
-
-    chart_layers = price_chart
-    if show_triggers and "Entry_Trigger" in hist.columns:
-        has_outcome = "Trigger_Outcome" in hist.columns
-        marker_cols = ["Close"] + (["Trigger_Outcome", "Trigger_R"] if has_outcome else [])
-        trigger_points = (
-            hist[hist["Entry_Trigger"].fillna(False)]
-            .reset_index(names="Date")[["Date"] + marker_cols]
-            .dropna(subset=["Close"])
-        )
-        if not trigger_points.empty:
-            panel_direction = summary.get("direction", direction)
-            marker_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
-            tooltip = [
-                alt.Tooltip("Date:T", title="Trigger Date"),
-                alt.Tooltip("Close:Q", title="Close", format=",.2f"),
-            ]
-            if has_outcome:
-                trigger_points["Trigger_Outcome"] = trigger_points["Trigger_Outcome"].replace(
-                    "", "Open"
-                )
-                tooltip += [
-                    alt.Tooltip("Trigger_Outcome:N", title="Outcome"),
-                    alt.Tooltip("Trigger_R:Q", title="Realized R", format="+.2f"),
-                ]
-                color_enc = alt.Color(
-                    "Trigger_Outcome:N",
-                    title="Trigger outcome",
-                    scale=alt.Scale(
-                        domain=["Win", "Loss", "Open"],
-                        range=["#1a7f37", "#c1121f", "#6e7781"],
-                    ),
-                )
-            else:
-                color_enc = alt.value("#1a7f37")
-
-            marker_layer = (
-                alt.Chart(trigger_points)
-                .mark_point(shape=marker_shape, size=90, filled=True, opacity=0.85)
-                .encode(
-                    x=alt.X("Date:T"),
-                    y=alt.Y("Close:Q"),
-                    color=color_enc,
-                    tooltip=tooltip,
-                )
-            )
-            chart_layers = alt.layer(price_chart, marker_layer)
-
-    st.altair_chart(chart_layers, width="stretch")
-
-    render_entry_panel(selected, hist, summary, selected_result)
-
-    detail_cols = st.columns(4)
-    detail_cols[0].metric(
-        "Latest Close",
-        f"${summary['entry_price']:.2f}",
-        help="Most recent close from Yahoo Finance daily data.",
-    )
-    detail_cols[1].metric(
-        "ATR",
-        f"${summary['atr']:.2f}",
-        help="Average True Range, a dollar estimate of recent daily price movement.",
-    )
-    detail_cols[2].metric(
-        "Combined Regime",
-        summary["volatility_regime"],
-        help="Low, Normal, or High volatility classification from the combined regime score.",
-    )
-    detail_cols[3].metric(
-        "Regime Score",
-        f"{summary['regime_score']:.2f}",
-        help="Average of ATR, Bollinger width, and VIX regime scores. Higher means more volatility.",
-    )
-
-    trend_cols = st.columns(3)
-    trend_cols[0].metric(
-        "Trend Strength",
-        f"{summary['trend_strength']:.2f}%" if not pd.isna(summary["trend_strength"]) else "N/A",
-        help="Current close compared with the 50-day moving average.",
-    )
-    trend_cols[1].metric(
-        "Long-Term Trend",
-        f"{summary['long_term_trend']:.2f}%" if not pd.isna(summary["long_term_trend"]) else "N/A",
-        help="Current close compared with the 200-day moving average.",
-    )
-    trend_cols[2].metric(
-        "VWAP Strength",
-        f"{summary['vwap_strength']:.2f}%" if not pd.isna(summary["vwap_strength"]) else "N/A",
-        help=(
-            "Current close compared with the 50-day volume-weighted average price. "
-            "Positive means price is above the recent volume-weighted cost basis."
-        ),
-    )
-    with st.expander("How to use the trend and VWAP metrics", expanded=False):
-        st.markdown(
-            """
-            **Trend Strength** shows whether price is above or below the 50-day moving average.
-            **Long-Term Trend** does the same against the 200-day moving average. Positive values
-            confirm price is above those trend lines; very large positive values can also mean the
-            move is extended.
-
-            **VWAP Strength** compares price with the 50-day volume-weighted average price, which
-            is a rough view of recent volume-weighted cost basis. If price is above both MA50 and
-            VWAP50, trend and recent buyer cost basis are confirming each other. If price is above
-            MA50 but below VWAP50, the simple trend may look constructive, but recent high-volume
-            buyers may still be underwater, which can create overhead supply.
-
-            Use these as context with ATR and Risk % to Stop: a strong trend with a reasonable
-            stop distance is usually cleaner than a strong-looking trend that is very extended or
-            sitting below its volume-weighted cost basis.
-            """
+    else:
+        detail_tab, entry_tab, scanner_tab, help_tab = st.tabs(
+            ["Ticker Detail", "Entry Plan", "Scanner", "Help & Reference"]
         )
 
-    risk_cols = st.columns(3)
-    risk_cols[0].metric(
-        "Stop Price",
-        f"${selected_result['Stop Price']:.2f}",
-        help="Calculated stop price for the selected ticker.",
-    )
-    risk_cols[1].metric(
-        "Stop Distance",
-        f"${selected_result['Stop Distance']:.2f}",
-        help="Dollar distance between entry price and stop price.",
-    )
-    risk_cols[2].metric(
-        "Risk % to Stop",
-        f"{selected_result['Risk % to Stop']:.2f}%",
-        help="How far this position can move against you before the stop is hit.",
-    )
+    # Render Ticker Detail first so the selected ticker and its context are available to
+    # the Entry Plan tab regardless of tab display order.
+    with detail_tab:
+        selected, hist, summary, selected_result = render_ticker_detail(
+            result_df, available_tickers, direction
+        )
 
-    st.subheader(f"{selected} Regime Details")
-    st.caption(
-        "Ratios compare the current reading with its recent average. Low is below 0.75, "
-        "High is above 1.50, and Normal is between those levels."
-    )
-    regime_detail = pd.DataFrame(
-        [
-            {
-                "Signal": "ATR Ratio",
-                "Value": round(summary["atr_ratio"], 3) if not pd.isna(summary["atr_ratio"]) else np.nan,
-                "Regime": summary["atr_regime"],
-            },
-            {
-                "Signal": "Bollinger Width Ratio",
-                "Value": round(summary["bb_ratio"], 3) if not pd.isna(summary["bb_ratio"]) else np.nan,
-                "Regime": summary["bb_regime"],
-            },
-            {
-                "Signal": "VIX Ratio",
-                "Value": round(summary["vix_ratio"], 3) if not pd.isna(summary["vix_ratio"]) else np.nan,
-                "Regime": summary["vix_regime"],
-            },
-        ]
-    )
-    st.dataframe(regime_detail, width="stretch")
+    with scanner_tab:
+        render_scanner(result_df)
+
+    with entry_tab:
+        render_entry_panel(selected, hist, summary, selected_result)
+
+    with help_tab:
+        render_help_reference()
 
 if st.session_state.errors:
     st.subheader("Errors")
@@ -1883,7 +1920,18 @@ if st.session_state.errors:
     st.dataframe(pd.DataFrame(st.session_state.errors), width="stretch")
 
 if not run_button and not st.session_state.results:
-    st.info("Enter tickers and click **Calculate Stops**.")
+    start_tab, help_tab = st.tabs(["Get started", "Help & Reference"])
+    with start_tab:
+        st.info("Enter tickers in the sidebar and click **Calculate Stops** to begin.")
+        st.markdown(
+            "Once you calculate, results open in tabs:\n\n"
+            "- **Scanner** — rank your watchlist by setup quality and triage the best ideas.\n"
+            "- **Ticker Detail** — the price/MA/stop chart plus grouped stop, trend, and regime metrics.\n"
+            "- **Entry Plan** — the deeper entry score, target, reward:risk, and signal replay.\n"
+            "- **Help & Reference** — the full guide, the ATR multiplier table, and metric definitions."
+        )
+    with help_tab:
+        render_help_reference()
 
 st.caption(
     "Educational tool only. Market data may be delayed or incomplete depending on Yahoo Finance availability."
