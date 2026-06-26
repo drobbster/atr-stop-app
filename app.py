@@ -1071,23 +1071,178 @@ def generate_stop_for_ticker(
     return stop, df, vol_summary
 
 
+def build_price_chart(
+    hist: pd.DataFrame, summary: dict, direction: str
+) -> Tuple[alt.TopLevelMixin, pd.DataFrame]:
+    """Build the price/MA/stop chart with entry-to-exit trade segments overlaid.
+
+    Returns the Altair chart and the (possibly empty) trades DataFrame used for the
+    overlay so callers can also render a trade-by-trade table.
+    """
+    chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
+        subset=["Close", "Stop Price"]
+    )
+    # Start the visible window where the longest MA first has a value so MA50 and MA200
+    # both span the entire chart instead of starting partway in and looking cut off.
+    if chart_df["MA200"].notna().any():
+        chart_df = chart_df.loc[chart_df["MA200"].first_valid_index():]
+    elif chart_df["MA50"].notna().any():
+        chart_df = chart_df.loc[chart_df["MA50"].first_valid_index():]
+    visible_start = chart_df.index.min() if not chart_df.empty else None
+    chart_df["Risk % to Stop"] = (chart_df["Stop Distance"] / chart_df["Close"]) * 100
+    chart_df["Tooltip Close"] = chart_df["Close"]
+    chart_df["Tooltip MA50"] = chart_df["MA50"]
+    chart_df["Tooltip MA200"] = chart_df["MA200"]
+    chart_df["Tooltip Stop Price"] = chart_df["Stop Price"]
+    chart_data = (
+        chart_df.reset_index(names="Date")
+        .melt(
+            id_vars=[
+                "Date",
+                "Tooltip Close",
+                "Tooltip MA50",
+                "Tooltip MA200",
+                "Tooltip Stop Price",
+                "Risk % to Stop",
+            ],
+            value_vars=["Close", "MA50", "MA200", "Stop Price"],
+            var_name="Series",
+            value_name="Price",
+        )
+        .dropna(subset=["Price"])
+    )
+    price_chart = (
+        alt.Chart(chart_data)
+        .mark_line()
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Price:Q", title="Price"),
+            color=alt.Color("Series:N", title="Series"),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Tooltip Close:Q", title="Close", format=",.2f"),
+                alt.Tooltip("Tooltip MA50:Q", title="MA50", format=",.2f"),
+                alt.Tooltip("Tooltip MA200:Q", title="MA200", format=",.2f"),
+                alt.Tooltip("Tooltip Stop Price:Q", title="Stop Price", format=",.2f"),
+                alt.Tooltip("Risk % to Stop:Q", title="Risk % to Stop", format=".2f"),
+            ],
+        )
+        .properties(height=360)
+    )
+
+    # Overlay each backtested entry trigger as a segment from its entry to its exit, so
+    # the chart shows where signals fired and how each trade actually resolved.
+    chart_layers = [price_chart]
+    trades = pd.DataFrame()
+    has_cols = "Entry_Trigger" in hist.columns and "Trigger_Exit_Date" in hist.columns
+    if has_cols:
+        trade_mask = hist["Entry_Trigger"].fillna(False)
+        if visible_start is not None:
+            trade_mask = trade_mask & (hist.index >= visible_start)
+        trades = (
+            hist[trade_mask]
+            .reset_index(names="Entry Date")[
+                [
+                    "Entry Date", "Close", "Trigger_Exit_Date", "Trigger_Exit_Price",
+                    "Trigger_Outcome", "Trigger_R",
+                ]
+            ]
+            .rename(
+                columns={
+                    "Close": "Entry Price",
+                    "Trigger_Exit_Date": "Exit Date",
+                    "Trigger_Exit_Price": "Exit Price",
+                    "Trigger_Outcome": "Outcome",
+                    "Trigger_R": "Realized R",
+                }
+            )
+            .dropna(subset=["Entry Price", "Exit Date", "Exit Price"])
+        )
+        trades["Outcome"] = trades["Outcome"].replace("", "Open")
+
+        if not trades.empty:
+            outcome_scale = alt.Scale(
+                domain=["Win", "Loss", "Open"],
+                range=["#1a7f37", "#c1121f", "#6e7781"],
+            )
+            trade_tooltip = [
+                alt.Tooltip("Entry Date:T", title="Entry"),
+                alt.Tooltip("Exit Date:T", title="Exit"),
+                alt.Tooltip("Outcome:N", title="Outcome"),
+                alt.Tooltip("Realized R:Q", title="Realized R", format="+.2f"),
+                alt.Tooltip("Entry Price:Q", title="Entry price", format=",.2f"),
+                alt.Tooltip("Exit Price:Q", title="Exit price", format=",.2f"),
+            ]
+            segments = (
+                alt.Chart(trades)
+                .mark_rule(strokeWidth=2, opacity=0.7)
+                .encode(
+                    x=alt.X("Entry Date:T"),
+                    x2="Exit Date:T",
+                    y=alt.Y("Entry Price:Q"),
+                    y2="Exit Price:Q",
+                    color=alt.Color("Outcome:N", title="Trade outcome", scale=outcome_scale),
+                    tooltip=trade_tooltip,
+                )
+            )
+            panel_direction = summary.get("direction", direction)
+            entry_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
+            entry_markers = (
+                alt.Chart(trades)
+                .mark_point(shape=entry_shape, size=70, filled=True, opacity=0.9)
+                .encode(
+                    x=alt.X("Entry Date:T"),
+                    y=alt.Y("Entry Price:Q"),
+                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
+                    tooltip=trade_tooltip,
+                )
+            )
+            exit_markers = (
+                alt.Chart(trades)
+                .mark_point(shape="circle", size=45, filled=True, opacity=0.9)
+                .encode(
+                    x=alt.X("Exit Date:T"),
+                    y=alt.Y("Exit Price:Q"),
+                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
+                    tooltip=trade_tooltip,
+                )
+            )
+            chart_layers += [segments, entry_markers, exit_markers]
+
+    if len(chart_layers) == 1:
+        final_chart = chart_layers[0]
+    else:
+        final_chart = alt.layer(*chart_layers).resolve_scale(color="independent")
+
+    return final_chart, trades
+
+
+TRADE_CHART_CAPTION = (
+    "Backtested entry triggers: each segment connects an entry (triangle) to its exit "
+    "(dot). Green hit the target, red hit the stop, gray is a time-exit still open at the "
+    "hold limit. Look-ahead-safe what-if context, not trade signals."
+)
+
+
 def render_entry_panel(
     selected: str,
     hist: pd.DataFrame,
     summary: dict,
     selected_result: pd.Series,
+    direction: str = "long",
 ) -> None:
-    """Render the Entry Panel: grade headline, trade plan, and component table."""
+    """Render the Entry/Exit Plan: grade, trade plan, chart, components, and trades."""
     strategy_type_panel = summary.get("strategy_type", "trend")
     direction_panel = summary.get("direction", "long")
     grade = summary.get("grade") or grade_setup(
         summary, strategy_type_panel, direction_panel
     )
 
-    st.subheader(f"{selected} Entry Setup")
+    st.subheader(f"{selected} entry and exit plan")
     st.caption(
-        "Completes the trade plan with entry trigger, location, target, and reward:risk. "
-        "Setup context for education only — not a trade recommendation."
+        "The full plan: entry trigger and location, stop and target, reward:risk, and how "
+        "this setup's triggers have historically resolved. Education only — not a trade "
+        "recommendation."
     )
 
     grade_letter = grade["grade"]
@@ -1182,6 +1337,11 @@ def render_entry_panel(
             "stop risk. Consider a different entry or target."
         )
 
+    st.markdown("**Price, stop, and historical entry/exit triggers**")
+    chart, _ = build_price_chart(hist, summary, direction_panel)
+    st.altair_chart(chart, width="stretch")
+    st.caption(TRADE_CHART_CAPTION)
+
     st.caption("Setup components (Score is each factor's 0-100 sub-score; Weight is its share of the Entry Score)")
     comp_df = pd.DataFrame(grade["components"])
     st.dataframe(comp_df, width="stretch", hide_index=True)
@@ -1220,10 +1380,46 @@ def render_entry_panel(
             f"{backtest['wins']} / {backtest['losses']} / {backtest['open']}",
             help="Counts of winning, losing, and still-open simulated trades.",
         )
+
+        _, trades = build_price_chart(hist, summary, direction_panel)
+        if not trades.empty:
+            positions = {date: i for i, date in enumerate(hist.index)}
+            trade_table = trades.copy()
+            trade_table["Bars Held"] = [
+                positions.get(exit_d, np.nan) - positions.get(entry_d, np.nan)
+                if exit_d in positions and entry_d in positions
+                else np.nan
+                for entry_d, exit_d in zip(
+                    trade_table["Entry Date"], trade_table["Exit Date"]
+                )
+            ]
+            trade_table = trade_table.sort_values("Entry Date", ascending=False)
+            trade_table["Entry Date"] = pd.to_datetime(
+                trade_table["Entry Date"]
+            ).dt.strftime("%Y-%m-%d")
+            trade_table["Exit Date"] = pd.to_datetime(
+                trade_table["Exit Date"]
+            ).dt.strftime("%Y-%m-%d")
+            trade_table["Entry Price"] = trade_table["Entry Price"].round(2)
+            trade_table["Exit Price"] = trade_table["Exit Price"].round(2)
+            trade_table["Realized R"] = trade_table["Realized R"].round(2)
+            trade_table["Bars Held"] = trade_table["Bars Held"].astype("Int64")
+            trade_table = trade_table[
+                [
+                    "Entry Date", "Exit Date", "Bars Held", "Outcome",
+                    "Realized R", "Entry Price", "Exit Price",
+                ]
+            ]
+            st.caption(
+                "Trade-by-trade replay of each historical entry trigger and how it exited "
+                "(most recent first). Realized R is the gain/loss in units of the stop "
+                "distance; Open trades are marked to the last close at the hold limit."
+            )
+            st.dataframe(trade_table, width="stretch", hide_index=True)
     else:
         st.caption("No historical entry triggers in the available window to backtest.")
 
-    with st.expander("How the Entry Panel works", expanded=False):
+    with st.expander("How the Entry/Exit Plan works", expanded=False):
         st.markdown(
             """
             The Entry Panel adds **entry timing** context on top of the existing stop/risk engine,
@@ -1467,168 +1663,22 @@ def render_scanner(result_df: pd.DataFrame) -> None:
 
 
 def render_ticker_detail(
-    result_df: pd.DataFrame,
-    available_tickers: List[str],
+    selected: str,
+    hist: pd.DataFrame,
+    summary: dict,
+    selected_result: pd.Series,
     direction: str,
-) -> Tuple[str, pd.DataFrame, dict, pd.Series]:
+) -> None:
     """Render the per-ticker chart and grouped Stop/Trend/Regime metrics."""
-    selected = st.selectbox(
-        "Ticker",
-        options=available_tickers,
-        key="selected_ticker",
-        help="Switch between the tickers from the latest calculation without rerunning the data fetch.",
-    )
-
-    hist = st.session_state.history_by_ticker[selected].copy()
-    summary = st.session_state.summaries_by_ticker[selected]
-    selected_result = result_df[result_df["Ticker"] == selected].iloc[0]
-
     st.subheader(f"{selected} price, moving averages, and stop")
     st.caption(
         "MA50 and MA200 give trend context; the stop-price line is recalculated for each "
         "historical day from that day's close, ATR, direction, and settings."
     )
-    chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
-        subset=["Close", "Stop Price"]
-    )
-    # Start the visible window where the longest MA first has a value so MA50 and MA200
-    # both span the entire chart instead of starting partway in and looking cut off.
-    if chart_df["MA200"].notna().any():
-        chart_df = chart_df.loc[chart_df["MA200"].first_valid_index():]
-    elif chart_df["MA50"].notna().any():
-        chart_df = chart_df.loc[chart_df["MA50"].first_valid_index():]
-    visible_start = chart_df.index.min() if not chart_df.empty else None
-    chart_df["Risk % to Stop"] = (chart_df["Stop Distance"] / chart_df["Close"]) * 100
-    chart_df["Tooltip Close"] = chart_df["Close"]
-    chart_df["Tooltip MA50"] = chart_df["MA50"]
-    chart_df["Tooltip MA200"] = chart_df["MA200"]
-    chart_df["Tooltip Stop Price"] = chart_df["Stop Price"]
-    chart_data = (
-        chart_df.reset_index(names="Date")
-        .melt(
-            id_vars=[
-                "Date",
-                "Tooltip Close",
-                "Tooltip MA50",
-                "Tooltip MA200",
-                "Tooltip Stop Price",
-                "Risk % to Stop",
-            ],
-            value_vars=["Close", "MA50", "MA200", "Stop Price"],
-            var_name="Series",
-            value_name="Price",
-        )
-        .dropna(subset=["Price"])
-    )
-    price_chart = (
-        alt.Chart(chart_data)
-        .mark_line()
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y("Price:Q", title="Price"),
-            color=alt.Color("Series:N", title="Series"),
-            tooltip=[
-                alt.Tooltip("Date:T", title="Date"),
-                alt.Tooltip("Tooltip Close:Q", title="Close", format=",.2f"),
-                alt.Tooltip("Tooltip MA50:Q", title="MA50", format=",.2f"),
-                alt.Tooltip("Tooltip MA200:Q", title="MA200", format=",.2f"),
-                alt.Tooltip("Tooltip Stop Price:Q", title="Stop Price", format=",.2f"),
-                alt.Tooltip("Risk % to Stop:Q", title="Risk % to Stop", format=".2f"),
-            ],
-        )
-        .properties(height=360)
-    )
-
-    # Overlay each backtested entry trigger as a segment from its entry to its exit, so
-    # the chart shows where signals fired and how each trade actually resolved.
-    chart_layers = [price_chart]
-    has_trades = "Entry_Trigger" in hist.columns and "Trigger_Exit_Date" in hist.columns
-    if has_trades:
-        trade_mask = hist["Entry_Trigger"].fillna(False)
-        if visible_start is not None:
-            trade_mask = trade_mask & (hist.index >= visible_start)
-        trades = (
-            hist[trade_mask]
-            .reset_index(names="Entry Date")[
-                [
-                    "Entry Date", "Close", "Trigger_Exit_Date", "Trigger_Exit_Price",
-                    "Trigger_Outcome", "Trigger_R",
-                ]
-            ]
-            .rename(
-                columns={
-                    "Close": "Entry Price",
-                    "Trigger_Exit_Date": "Exit Date",
-                    "Trigger_Exit_Price": "Exit Price",
-                    "Trigger_Outcome": "Outcome",
-                    "Trigger_R": "Realized R",
-                }
-            )
-            .dropna(subset=["Entry Price", "Exit Date", "Exit Price"])
-        )
-        trades["Outcome"] = trades["Outcome"].replace("", "Open")
-
-        if not trades.empty:
-            outcome_scale = alt.Scale(
-                domain=["Win", "Loss", "Open"],
-                range=["#1a7f37", "#c1121f", "#6e7781"],
-            )
-            trade_tooltip = [
-                alt.Tooltip("Entry Date:T", title="Entry"),
-                alt.Tooltip("Exit Date:T", title="Exit"),
-                alt.Tooltip("Outcome:N", title="Outcome"),
-                alt.Tooltip("Realized R:Q", title="Realized R", format="+.2f"),
-                alt.Tooltip("Entry Price:Q", title="Entry price", format=",.2f"),
-                alt.Tooltip("Exit Price:Q", title="Exit price", format=",.2f"),
-            ]
-            segments = (
-                alt.Chart(trades)
-                .mark_rule(strokeWidth=2, opacity=0.7)
-                .encode(
-                    x=alt.X("Entry Date:T"),
-                    x2="Exit Date:T",
-                    y=alt.Y("Entry Price:Q"),
-                    y2="Exit Price:Q",
-                    color=alt.Color("Outcome:N", title="Trade outcome", scale=outcome_scale),
-                    tooltip=trade_tooltip,
-                )
-            )
-            panel_direction = summary.get("direction", direction)
-            entry_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
-            entry_markers = (
-                alt.Chart(trades)
-                .mark_point(shape=entry_shape, size=70, filled=True, opacity=0.9)
-                .encode(
-                    x=alt.X("Entry Date:T"),
-                    y=alt.Y("Entry Price:Q"),
-                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
-                    tooltip=trade_tooltip,
-                )
-            )
-            exit_markers = (
-                alt.Chart(trades)
-                .mark_point(shape="circle", size=45, filled=True, opacity=0.9)
-                .encode(
-                    x=alt.X("Exit Date:T"),
-                    y=alt.Y("Exit Price:Q"),
-                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
-                    tooltip=trade_tooltip,
-                )
-            )
-            chart_layers += [segments, entry_markers, exit_markers]
-
-    if len(chart_layers) == 1:
-        final_chart = chart_layers[0]
-    else:
-        final_chart = alt.layer(*chart_layers).resolve_scale(color="independent")
-
-    st.altair_chart(final_chart, width="stretch")
-    if len(chart_layers) > 1:
-        st.caption(
-            "Backtested entry triggers: each segment connects an entry (triangle) to its exit "
-            "(dot). Green hit the target, red hit the stop, gray is a time-exit still open at the "
-            "hold limit. Look-ahead-safe what-if context, not trade signals."
-        )
+    chart, trades = build_price_chart(hist, summary, direction)
+    st.altair_chart(chart, width="stretch")
+    if not trades.empty:
+        st.caption(TRADE_CHART_CAPTION)
 
     st.subheader("Stop & risk")
     risk_cols = st.columns(3)
@@ -1716,8 +1766,6 @@ def render_ticker_detail(
     )
     st.dataframe(regime_detail, width="stretch")
 
-    return selected, hist, summary, selected_result
-
 
 # =========================
 # Streamlit UI
@@ -1734,7 +1782,7 @@ st.caption("Regime-aware ATR stop-loss calculator for stocks and ETFs.")
 st.markdown(
     "Enter a watchlist in the sidebar and click **Calculate Stops**. "
     "Results open in tabs: **Scanner** to triage, **Ticker Detail** for the chart and stop, "
-    "**Entry Plan** for the deeper setup, and **Help & Reference** for the guide."
+    "**Entry/Exit Plan** for the deeper setup, and **Help & Reference** for the guide."
 )
 
 with st.sidebar:
@@ -1938,31 +1986,39 @@ if st.session_state.results:
     if st.session_state.get("selected_ticker") not in available_tickers:
         st.session_state.selected_ticker = available_tickers[0]
 
+    # One ticker selector above the tabs so it controls both Ticker Detail and the
+    # Entry/Exit Plan (a duplicate selectbox per tab would collide on the same key).
+    selected = st.selectbox(
+        "Ticker (for Ticker Detail and Entry/Exit Plan)",
+        options=available_tickers,
+        key="selected_ticker",
+        help="Switch between the tickers from the latest calculation without rerunning the data fetch.",
+    )
+    hist = st.session_state.history_by_ticker[selected].copy()
+    summary = st.session_state.summaries_by_ticker[selected]
+    selected_result = result_df[result_df["Ticker"] == selected].iloc[0]
+
     multiple = len(available_tickers) > 1
 
     # With several tickers, lead with the Scanner for triage. With a single ticker the
     # scanner is redundant, so land on Ticker Detail and push the scanner to the end.
     if multiple:
         scanner_tab, detail_tab, entry_tab, help_tab = st.tabs(
-            ["Scanner", "Ticker Detail", "Entry Plan", "Help & Reference"]
+            ["Scanner", "Ticker Detail", "Entry/Exit Plan", "Help & Reference"]
         )
     else:
         detail_tab, entry_tab, scanner_tab, help_tab = st.tabs(
-            ["Ticker Detail", "Entry Plan", "Scanner", "Help & Reference"]
-        )
-
-    # Render Ticker Detail first so the selected ticker and its context are available to
-    # the Entry Plan tab regardless of tab display order.
-    with detail_tab:
-        selected, hist, summary, selected_result = render_ticker_detail(
-            result_df, available_tickers, direction
+            ["Ticker Detail", "Entry/Exit Plan", "Scanner", "Help & Reference"]
         )
 
     with scanner_tab:
         render_scanner(result_df)
 
+    with detail_tab:
+        render_ticker_detail(selected, hist, summary, selected_result, direction)
+
     with entry_tab:
-        render_entry_panel(selected, hist, summary, selected_result)
+        render_entry_panel(selected, hist, summary, selected_result, direction)
 
     with help_tab:
         render_help_reference()
@@ -1980,7 +2036,7 @@ if not run_button and not st.session_state.results:
             "Once you calculate, results open in tabs:\n\n"
             "- **Scanner** — rank your watchlist by setup quality and triage the best ideas.\n"
             "- **Ticker Detail** — the price/MA/stop chart plus grouped stop, trend, and regime metrics.\n"
-            "- **Entry Plan** — the deeper entry score, target, reward:risk, and signal replay.\n"
+            "- **Entry/Exit Plan** — entry score, stop/target, reward:risk, the entry/exit chart, signal replay, and a trade-by-trade table.\n"
             "- **Help & Reference** — the full guide, the ATR multiplier table, and metric definitions."
         )
     with help_tab:
