@@ -545,6 +545,8 @@ def backtest_triggers(
 
     outcomes = np.array([""] * n, dtype=object)
     realized = np.full(n, np.nan)
+    exit_idx = np.full(n, -1, dtype=int)
+    exit_price = np.full(n, np.nan)
 
     for i in range(n):
         if not trig[i]:
@@ -559,26 +561,35 @@ def backtest_triggers(
             target, stop = entry - reward, entry + risk
 
         end = min(i + hold, n - 1)
-        outcome, r_val = None, None
+        outcome, r_val, j_exit, px_exit = None, None, None, None
         for j in range(i + 1, end + 1):
             if is_long:
                 hit_stop, hit_tgt = low[j] <= stop, high[j] >= target
             else:
                 hit_stop, hit_tgt = high[j] >= stop, low[j] <= target
             if hit_stop:  # conservative: if both hit in one bar, assume stop first
-                outcome, r_val = "Loss", -1.0
+                outcome, r_val, j_exit, px_exit = "Loss", -1.0, j, stop
                 break
             if hit_tgt:
-                outcome, r_val = "Win", reward / risk
+                outcome, r_val, j_exit, px_exit = "Win", reward / risk, j, target
                 break
         if outcome is None:
             outcome = "Open"
             r_val = ((close[end] - entry) if is_long else (entry - close[end])) / risk
+            j_exit, px_exit = end, close[end]
 
         outcomes[i], realized[i] = outcome, r_val
+        exit_idx[i], exit_price[i] = j_exit, px_exit
 
     df["Trigger_Outcome"] = outcomes
     df["Trigger_R"] = realized
+    df["Trigger_Exit_Date"] = pd.to_datetime(
+        pd.Series(
+            [df.index[k] if k >= 0 else pd.NaT for k in exit_idx],
+            index=df.index,
+        )
+    )
+    df["Trigger_Exit_Price"] = exit_price
 
     signal_mask = outcomes != ""
     all_r = realized[signal_mask]
@@ -1477,15 +1488,6 @@ def render_ticker_detail(
         "MA50 and MA200 give trend context; the stop-price line is recalculated for each "
         "historical day from that day's close, ATR, direction, and settings."
     )
-    show_triggers = st.checkbox(
-        "Show entry-trigger markers",
-        value=True,
-        key=f"show_triggers_{selected}",
-        help=(
-            "Marks historical bars where trend alignment, location, and the RSI trigger all "
-            "fired for the selected direction. Context only, not trade signals."
-        ),
-    )
     chart_df = hist[["Close", "MA50", "MA200", "Stop Price", "Stop Distance"]].dropna(
         subset=["Close", "Stop Price"]
     )
@@ -1537,57 +1539,96 @@ def render_ticker_detail(
         .properties(height=360)
     )
 
-    chart_layers = price_chart
-    if show_triggers and "Entry_Trigger" in hist.columns:
-        has_outcome = "Trigger_Outcome" in hist.columns
-        marker_cols = ["Close"] + (["Trigger_Outcome", "Trigger_R"] if has_outcome else [])
-        trigger_mask = hist["Entry_Trigger"].fillna(False)
+    # Overlay each backtested entry trigger as a segment from its entry to its exit, so
+    # the chart shows where signals fired and how each trade actually resolved.
+    chart_layers = [price_chart]
+    has_trades = "Entry_Trigger" in hist.columns and "Trigger_Exit_Date" in hist.columns
+    if has_trades:
+        trade_mask = hist["Entry_Trigger"].fillna(False)
         if visible_start is not None:
-            trigger_mask = trigger_mask & (hist.index >= visible_start)
-        trigger_points = (
-            hist[trigger_mask]
-            .reset_index(names="Date")[["Date"] + marker_cols]
-            .dropna(subset=["Close"])
-        )
-        if not trigger_points.empty:
-            panel_direction = summary.get("direction", direction)
-            marker_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
-            tooltip = [
-                alt.Tooltip("Date:T", title="Trigger Date"),
-                alt.Tooltip("Close:Q", title="Close", format=",.2f"),
-            ]
-            if has_outcome:
-                trigger_points["Trigger_Outcome"] = trigger_points["Trigger_Outcome"].replace(
-                    "", "Open"
-                )
-                tooltip += [
-                    alt.Tooltip("Trigger_Outcome:N", title="Outcome"),
-                    alt.Tooltip("Trigger_R:Q", title="Realized R", format="+.2f"),
+            trade_mask = trade_mask & (hist.index >= visible_start)
+        trades = (
+            hist[trade_mask]
+            .reset_index(names="Entry Date")[
+                [
+                    "Entry Date", "Close", "Trigger_Exit_Date", "Trigger_Exit_Price",
+                    "Trigger_Outcome", "Trigger_R",
                 ]
-                color_enc = alt.Color(
-                    "Trigger_Outcome:N",
-                    title="Trigger outcome",
-                    scale=alt.Scale(
-                        domain=["Win", "Loss", "Open"],
-                        range=["#1a7f37", "#c1121f", "#6e7781"],
-                    ),
-                )
-            else:
-                color_enc = alt.value("#1a7f37")
+            ]
+            .rename(
+                columns={
+                    "Close": "Entry Price",
+                    "Trigger_Exit_Date": "Exit Date",
+                    "Trigger_Exit_Price": "Exit Price",
+                    "Trigger_Outcome": "Outcome",
+                    "Trigger_R": "Realized R",
+                }
+            )
+            .dropna(subset=["Entry Price", "Exit Date", "Exit Price"])
+        )
+        trades["Outcome"] = trades["Outcome"].replace("", "Open")
 
-            marker_layer = (
-                alt.Chart(trigger_points)
-                .mark_point(shape=marker_shape, size=90, filled=True, opacity=0.85)
+        if not trades.empty:
+            outcome_scale = alt.Scale(
+                domain=["Win", "Loss", "Open"],
+                range=["#1a7f37", "#c1121f", "#6e7781"],
+            )
+            trade_tooltip = [
+                alt.Tooltip("Entry Date:T", title="Entry"),
+                alt.Tooltip("Exit Date:T", title="Exit"),
+                alt.Tooltip("Outcome:N", title="Outcome"),
+                alt.Tooltip("Realized R:Q", title="Realized R", format="+.2f"),
+                alt.Tooltip("Entry Price:Q", title="Entry price", format=",.2f"),
+                alt.Tooltip("Exit Price:Q", title="Exit price", format=",.2f"),
+            ]
+            segments = (
+                alt.Chart(trades)
+                .mark_rule(strokeWidth=2, opacity=0.7)
                 .encode(
-                    x=alt.X("Date:T"),
-                    y=alt.Y("Close:Q"),
-                    color=color_enc,
-                    tooltip=tooltip,
+                    x=alt.X("Entry Date:T"),
+                    x2="Exit Date:T",
+                    y=alt.Y("Entry Price:Q"),
+                    y2="Exit Price:Q",
+                    color=alt.Color("Outcome:N", title="Trade outcome", scale=outcome_scale),
+                    tooltip=trade_tooltip,
                 )
             )
-            chart_layers = alt.layer(price_chart, marker_layer)
+            panel_direction = summary.get("direction", direction)
+            entry_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
+            entry_markers = (
+                alt.Chart(trades)
+                .mark_point(shape=entry_shape, size=70, filled=True, opacity=0.9)
+                .encode(
+                    x=alt.X("Entry Date:T"),
+                    y=alt.Y("Entry Price:Q"),
+                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
+                    tooltip=trade_tooltip,
+                )
+            )
+            exit_markers = (
+                alt.Chart(trades)
+                .mark_point(shape="circle", size=45, filled=True, opacity=0.9)
+                .encode(
+                    x=alt.X("Exit Date:T"),
+                    y=alt.Y("Exit Price:Q"),
+                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
+                    tooltip=trade_tooltip,
+                )
+            )
+            chart_layers += [segments, entry_markers, exit_markers]
 
-    st.altair_chart(chart_layers, width="stretch")
+    if len(chart_layers) == 1:
+        final_chart = chart_layers[0]
+    else:
+        final_chart = alt.layer(*chart_layers).resolve_scale(color="independent")
+
+    st.altair_chart(final_chart, width="stretch")
+    if len(chart_layers) > 1:
+        st.caption(
+            "Backtested entry triggers: each segment connects an entry (triangle) to its exit "
+            "(dot). Green hit the target, red hit the stop, gray is a time-exit still open at the "
+            "hold limit. Look-ahead-safe what-if context, not trade signals."
+        )
 
     st.subheader("Stop & risk")
     risk_cols = st.columns(3)
