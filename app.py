@@ -1130,9 +1130,8 @@ def build_price_chart(
         .properties(height=360)
     )
 
-    # Overlay each backtested entry trigger as a segment from its entry to its exit, so
-    # the chart shows where signals fired and how each trade actually resolved.
-    chart_layers = [price_chart]
+    # Trades are still computed for the Entry/Exit Plan trade table, but no longer drawn
+    # on the price chart (historical backtest outcomes cluttered the price view).
     trades = pd.DataFrame()
     has_cols = "Entry_Trigger" in hist.columns and "Trigger_Exit_Date" in hist.columns
     if has_cols:
@@ -1160,68 +1159,7 @@ def build_price_chart(
         )
         trades["Outcome"] = trades["Outcome"].replace("", "Open")
 
-        if not trades.empty:
-            outcome_scale = alt.Scale(
-                domain=["Win", "Loss", "Open"],
-                range=["#1a7f37", "#c1121f", "#6e7781"],
-            )
-            trade_tooltip = [
-                alt.Tooltip("Entry Date:T", title="Entry"),
-                alt.Tooltip("Exit Date:T", title="Exit"),
-                alt.Tooltip("Outcome:N", title="Outcome"),
-                alt.Tooltip("Realized R:Q", title="Realized R", format="+.2f"),
-                alt.Tooltip("Entry Price:Q", title="Entry price", format=",.2f"),
-                alt.Tooltip("Exit Price:Q", title="Exit price", format=",.2f"),
-            ]
-            segments = (
-                alt.Chart(trades)
-                .mark_rule(strokeWidth=2, opacity=0.7)
-                .encode(
-                    x=alt.X("Entry Date:T"),
-                    x2="Exit Date:T",
-                    y=alt.Y("Entry Price:Q"),
-                    y2="Exit Price:Q",
-                    color=alt.Color("Outcome:N", title="Trade outcome", scale=outcome_scale),
-                    tooltip=trade_tooltip,
-                )
-            )
-            panel_direction = summary.get("direction", direction)
-            entry_shape = "triangle-up" if panel_direction == "long" else "triangle-down"
-            entry_markers = (
-                alt.Chart(trades)
-                .mark_point(shape=entry_shape, size=70, filled=True, opacity=0.9)
-                .encode(
-                    x=alt.X("Entry Date:T"),
-                    y=alt.Y("Entry Price:Q"),
-                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
-                    tooltip=trade_tooltip,
-                )
-            )
-            exit_markers = (
-                alt.Chart(trades)
-                .mark_point(shape="circle", size=45, filled=True, opacity=0.9)
-                .encode(
-                    x=alt.X("Exit Date:T"),
-                    y=alt.Y("Exit Price:Q"),
-                    color=alt.Color("Outcome:N", scale=outcome_scale, legend=None),
-                    tooltip=trade_tooltip,
-                )
-            )
-            chart_layers += [segments, entry_markers, exit_markers]
-
-    if len(chart_layers) == 1:
-        final_chart = chart_layers[0]
-    else:
-        final_chart = alt.layer(*chart_layers).resolve_scale(color="independent")
-
-    return final_chart, trades
-
-
-TRADE_CHART_CAPTION = (
-    "Backtested entry triggers: each segment connects an entry (triangle) to its exit "
-    "(dot). Green hit the target, red hit the stop, gray is a time-exit still open at the "
-    "hold limit. Look-ahead-safe what-if context, not trade signals."
-)
+    return price_chart, trades
 
 
 def render_entry_panel(
@@ -1337,10 +1275,9 @@ def render_entry_panel(
             "stop risk. Consider a different entry or target."
         )
 
-    st.markdown("**Price, stop, and historical entry/exit triggers**")
+    st.markdown("**Price, moving averages, and stop**")
     chart, _ = build_price_chart(hist, summary, direction_panel)
     st.altair_chart(chart, width="stretch")
-    st.caption(TRADE_CHART_CAPTION)
 
     st.caption("Setup components (Score is each factor's 0-100 sub-score; Weight is its share of the Entry Score)")
     comp_df = pd.DataFrame(grade["components"])
@@ -1675,10 +1612,8 @@ def render_ticker_detail(
         "MA50 and MA200 give trend context; the stop-price line is recalculated for each "
         "historical day from that day's close, ATR, direction, and settings."
     )
-    chart, trades = build_price_chart(hist, summary, direction)
+    chart, _ = build_price_chart(hist, summary, direction)
     st.altair_chart(chart, width="stretch")
-    if not trades.empty:
-        st.caption(TRADE_CHART_CAPTION)
 
     st.subheader("Stop & risk")
     risk_cols = st.columns(3)
