@@ -2,9 +2,10 @@
 
 ## 0. Purpose & scope
 
-The ATR Stop Calculator today is an **exit/risk engine**: given a ticker you already
-hold (or plan to hold), it answers "how volatile is this, what regime is it in, where
-does the stop go, and how many shares fit my risk budget."
+The app (now the **Trade Setup Planner**, originally the ATR Stop Calculator) began as
+an **exit/risk engine**: given a ticker you already hold (or plan to hold), it answers
+"how volatile is this, what regime is it in, where does the stop go, and how many shares
+fit my risk budget."
 
 This spec designs an **Entry Panel** that completes the trade-plan loop:
 
@@ -496,13 +497,22 @@ trade recommendation."
 
 ---
 
-## 7. Roadmap beyond Phase 2 (deferred)
+## 7. Roadmap beyond Phase 2
 
-1. **Composite numeric Entry Score** — weight the now-validated components into a single
-   0–100 score (supersedes the coarse A/B/C tag).
-2. **Backtest markers & stats** — historical hit-rate / average-R per signal using the
-   existing historical rebuild machinery, to calibrate `ENTRY_CONFIG` and earn trust.
-3. **Scanner mode** — rank a watchlist by setup quality instead of per-ticker.
+> **Status:** items 1–3 have since shipped. The coarse A/B/C tag is now derived from a
+> composite **0–100 Entry Score** (weighted in `ENTRY_WEIGHTS`), a look-ahead-safe
+> **signal replay** reports win-rate / average-R / expectancy per ticker, and the
+> **Setup Scanner** ranks a whole watchlist. An RSI-divergence factor was prototyped and
+> then **rejected** after backtesting — see the §9 decision record. Items 4–5 remain deferred.
+
+1. ~~**Composite numeric Entry Score**~~ — *shipped.* Weights the validated components
+   into a single 0–100 score (`grade_setup` + `ENTRY_WEIGHTS`); the A/B/C grade is now
+   derived from it (A ≥ 75, B ≥ 55, else C).
+2. ~~**Backtest markers & stats**~~ — *shipped.* The signal replay walks every historical
+   trigger forward with the same ATR stop and an ATR-multiple target and reports win
+   rate, average R, and expectancy.
+3. ~~**Scanner mode**~~ — *shipped.* The Setup Scanner ranks a watchlist by Entry Score /
+   Reward:Risk with grade and Reward:Risk filters.
 4. **Intraday entries** — opening-range / intraday VWAP for the `day` bucket (new data
    cadence).
 5. **Alerts & earnings-date awareness** — "notify on pullback to MA50 within 0.5 ATR";
@@ -518,3 +528,60 @@ trade recommendation."
 - **Phase 2:** `add_momentum_features` (RSI/volume) → `add_relative_strength` (SPY) →
   `grade_setup` (A/B/C) → wire grade + RS/RSI/volume rows into the panel + trigger
   chart markers + `ENTRY_CONFIG` strategy tuning.
+
+---
+
+## 9. RSI divergence — evaluated and rejected (decision record)
+
+> **Status: not in the app.** RSI divergence (price highs not confirmed by RSI) was built
+> as a swing-pivot factor, trialed first as a weighted scoring modifier and then as an
+> informational read, and finally **removed entirely** after backtesting showed no edge.
+> This section is kept as a decision record so the idea isn't naively re-added.
+
+### 9.1 The idea
+
+The `Trigger (RSI)` factor (§3.3) reads RSI's *absolute zone* but is blind to whether
+momentum is **confirming** price. A **bearish divergence** is a higher price high on a
+*lower* RSI high (the mirror, **bullish divergence**, is a lower low on a higher RSI low).
+It is a staple of chart commentary as a topping/bottoming caution.
+
+### 9.2 How it was measured
+
+A swing-pivot implementation (fractal pivot highs/lows, RSI compared at the last two
+*confirmed* pivots, look-ahead-safe) was evaluated **onset-based**: forward outcomes were
+measured from the moment each `Confirmed` / `Bearish Divergence` state first appears, which
+avoids the autocorrelation that inflates naive per-bar tests. Universe: 35 liquid
+stocks/ETFs, 5–8y daily. Candidate pivot windows of 2–21 bars were tested per horizon.
+
+### 9.3 Findings — no usable edge
+
+- **Forward return** (Confirmed − Bearish; positive = divergence precedes weaker returns):
+  **negative in 10 of 12** strategy/window cells — bearish-divergence onsets were on
+  average followed by *higher* returns than confirmed higher-highs.
+- **Forward drawdown** (the "tighten the stop" rationale): bearish-divergence onsets had
+  **shallower** max drawdowns than confirmed onsets in **every** strategy/window — opposite
+  of a risk caution.
+- **Overbought-gated steelman** (divergence + RSI ≥ 65): sample collapses (n≈2–66), no
+  coherent edge.
+- **Regime cut** (risk-off bars, SPY < MA200, 8y): only a weak, inconsistent hint of
+  relative-return underperformance at swing/position horizons (small n); the drawdown gap
+  stayed negative in every regime, so still not a stop signal.
+
+The pivot window barely changed any of this — the weakness was the signal, not the
+parameter. Divergences are routinely overrun in trends.
+
+### 9.4 Decision
+
+Removed from the codebase and all user-facing surfaces: no scoring factor, no informational
+read, no Scanner column, no `ENTRY_CONFIG` pivot knobs, not in the signal replay, and no
+mention in the in-app Help, README, or user guide. This design doc is the only remaining
+record, kept so the idea isn't naively re-added.
+
+### 9.5 Caveats / if revisited
+
+The test window (2018–2026) was predominantly bullish and the basket is current survivors,
+so the study under-samples genuine major tops where divergence is theorized to work best.
+If revisited, do it *only* behind the deferred backtest harness (§7), test a *specific
+conditional* setup (e.g. divergence + extended location + overbought) rather than a blanket
+read, and require it to clear a pre-registered edge threshold before it goes anywhere near
+the score — do **not** reinstate it as an always-on indicator.

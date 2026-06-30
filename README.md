@@ -1,16 +1,27 @@
-# ATR Stop Calculator
+# Trade Setup Planner
 
-Streamlit app for calculating regime-aware ATR stop-loss levels for stocks and ETFs.
+Streamlit app that plans a full stock/ETF trade — **entry, stop, target, reward:risk, and
+position size** — and scores how good each setup is. (Formerly the *ATR Stop Calculator*;
+the regime-aware ATR stop is now the risk leg of a broader entry/exit planner.)
 
-The app is designed as an educational risk-management tool. It helps answer:
+The app is an educational decision-support tool. It helps answer:
 
-- How volatile is this ticker right now?
-- What volatility regime is it in?
-- Where would an ATR-based stop sit?
-- How far can the position move against me before the stop is hit?
+- How good is this setup right now (0-100 Entry Score and A/B/C grade)?
+- Which names on my watchlist deserve attention first (Setup Scanner)?
+- Where would the entry, stop, and target sit, and is the reward:risk asymmetric?
+- How volatile is this ticker, and what volatility regime is it in?
+- How far can the position move against me before the stop is hit, and how many shares fit my risk budget?
 - Is price above or below its intermediate and long-term moving averages?
 
 ## Functionality
+
+### Setup Scanner
+
+When you analyze more than one ticker, the **Setup Scanner** ranks the whole watchlist so
+you can triage the best opportunities first. Sort by **Entry Score** (highest-quality
+setups), **Reward:Risk** (most asymmetric), or **Signal Win % / Avg R**, and filter to
+**A/B grades** with a **minimum Reward:Risk** to hide weak ideas. Results also include the
+per-ticker chart/detail and the full Entry/Exit Plan in separate tabs, plus a CSV export.
 
 ### Regime-Aware ATR Stops
 

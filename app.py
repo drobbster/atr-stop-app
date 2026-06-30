@@ -53,7 +53,8 @@ ENTRY_CONFIG: Dict[str, Dict[str, float]] = {
 # Per-strategy weights for the composite 0-100 Entry Score. Each factor contributes a
 # 0..1 sub-score; the weighted average over applicable factors is scaled to 0-100.
 # Weights reflect each strategy's archetype (e.g. trend leans on alignment + relative
-# strength; day/swing lean on the trigger and location).
+# strength; day/swing lean on the trigger and location). RSI divergence was evaluated as a
+# factor and intentionally excluded (no measured edge; see docs/entry-panel-design.md §9).
 ENTRY_WEIGHTS: Dict[str, Dict[str, float]] = {
     "day": {"trend": 1.0, "location": 2.0, "cost_basis": 1.0, "trigger": 2.0, "volume": 2.0, "rs": 1.0},
     "swing": {"trend": 1.5, "location": 2.0, "cost_basis": 1.0, "trigger": 2.0, "volume": 1.0, "rs": 1.5},
@@ -1389,18 +1390,23 @@ def render_entry_panel(
 
 def render_help_reference() -> None:
     """Consolidated guides and reference tables, kept out of the working views."""
-    st.subheader("How this calculator works")
+    st.subheader("How this app works")
     st.markdown(
         """
-        This app estimates a stop-loss price by multiplying a ticker's Average True Range (ATR)
-        by a strategy-specific multiplier. Wider stops are used for longer-horizon strategies
-        and higher-volatility regimes.
+        This app plans a full trade — **where to enter, where to exit, and how much to risk** — and
+        scores how good each setup is. For every ticker it grades the setup `0-100` (A/B/C) from
+        direction-aware factors (trend alignment, location vs. support, cost basis, RSI trigger,
+        relative volume, and relative strength), then pairs that entry read with a volatility-based
+        ATR stop, a structure/ATR target, reward:risk, and optional position sizing. A look-ahead-safe
+        signal replay estimates how each setup type has historically resolved.
 
-        The volatility regime combines three signals: the ticker's ATR ratio, Bollinger Band
-        width ratio, and an optional VIX macro overlay. Trend Strength compares the close with
-        the 50-day moving average, and Long-Term Trend compares it with the 200-day moving average.
-        The chart compares close, MA50, MA200, and stop price so you can see trend context and
-        how much room the stop gives the trade.
+        The **ATR stop** sets the risk leg: stop distance is the ticker's Average True Range times a
+        strategy- and regime-specific multiplier, so wider stops are used for longer-horizon strategies
+        and higher-volatility regimes. The **volatility regime** combines three signals — the ATR ratio,
+        Bollinger Band width ratio, and an optional VIX macro overlay. **Trend Strength** compares the
+        close with the 50-day moving average and **Long-Term Trend** with the 200-day. The chart overlays
+        close, MA50, MA200, and the stop price so you can see trend context and how much room the stop
+        gives the trade.
         """
     )
 
@@ -1467,7 +1473,7 @@ def render_help_reference() -> None:
             - **Benchmark:** the index your relative-strength is measured against (`SPY` by default;
               use `QQQ` for tech-heavy names).
             - Leave the indicator/override defaults unless you have a reason to change them, then click
-              **Calculate Stops**.
+              **Analyze Setups**.
 
             #### 2. Triage with the Setup Scanner
             The scanner ranks your whole watchlist by setup quality. Start at the top:
@@ -1707,15 +1713,15 @@ def render_ticker_detail(
 # =========================
 
 st.set_page_config(
-    page_title="ATR Stop Calculator",
+    page_title="Trade Setup Planner",
     page_icon="",
     layout="wide",
 )
 
-st.title("ATR Stop Calculator")
-st.caption("Regime-aware ATR stop-loss calculator for stocks and ETFs.")
+st.title("Trade Setup Planner")
+st.caption("Regime-aware entry, stop, and reward:risk planner for stocks and ETFs.")
 st.markdown(
-    "Enter a watchlist in the sidebar and click **Calculate Stops**. "
+    "Enter a watchlist in the sidebar and click **Analyze Setups**. "
     "Results open in tabs: **Scanner** to triage, **Ticker Detail** for the chart and stop, "
     "**Entry/Exit Plan** for the deeper setup, and **Help & Reference** for the guide."
 )
@@ -1851,7 +1857,7 @@ with st.sidebar:
         if max_position_pct == 0:
             max_position_pct = None
 
-    run_button = st.button("Calculate Stops", type="primary")
+    run_button = st.button("Analyze Setups", type="primary")
 
 
 for key, initial_value in {
@@ -1966,7 +1972,7 @@ if st.session_state.errors:
 if not run_button and not st.session_state.results:
     start_tab, help_tab = st.tabs(["Get started", "Help & Reference"])
     with start_tab:
-        st.info("Enter tickers in the sidebar and click **Calculate Stops** to begin.")
+        st.info("Enter tickers in the sidebar and click **Analyze Setups** to begin.")
         st.markdown(
             "Once you calculate, results open in tabs:\n\n"
             "- **Scanner** — rank your watchlist by setup quality and triage the best ideas.\n"
