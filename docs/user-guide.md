@@ -1,6 +1,6 @@
 # User Guide — Finding Better Entries and Maximizing Reward vs. Risk
 
-This guide explains how to use every feature of the ATR Stop Calculator together as a
+This guide explains how to use every feature of the Trade Setup Planner together as a
 repeatable workflow: **where to enter, where to exit, and how much to risk** — while
 staying on the right side of reward vs. risk.
 
@@ -33,7 +33,7 @@ plan.
 | **Relative-strength benchmark** | Index your relative strength is measured against. | `SPY` for broad names; `QQQ` for tech-heavy names; `IWM` for small caps. |
 | Indicator settings / overrides | ATR window, regime lookback, Bollinger window, VIX overlay, regime/multiplier overrides. | Leave at defaults unless you have a specific reason. |
 
-Click **Calculate Stops** to run the whole watchlist.
+Click **Analyze Setups** to run the whole watchlist.
 
 ---
 
