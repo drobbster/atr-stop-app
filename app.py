@@ -50,11 +50,13 @@ ENTRY_CONFIG: Dict[str, Dict[str, float]] = {
                  "vol_mult": 1.2, "vol_required": False, "rs_lookback": 126},
 }
 
-# Per-strategy weights for the composite 0-100 Entry Score. Each factor contributes a
-# 0..1 sub-score; the weighted average over applicable factors is scaled to 0-100.
-# Weights reflect each strategy's archetype (e.g. trend leans on alignment + relative
-# strength; day/swing lean on the trigger and location). RSI divergence was evaluated as a
-# factor and intentionally excluded (no measured edge; see docs/entry-panel-design.md §9).
+# Per-strategy weights for the two-axis entry read. Each factor contributes a 0..1
+# sub-score; grade_setup splits them into a Setup Quality read (trend, cost_basis, volume,
+# rs) and an Entry Timing read (location, trigger), each a weighted average over its
+# applicable factors. Weights reflect each strategy's archetype (e.g. trend leans on
+# alignment + relative strength; day/swing lean on the trigger and location). RSI divergence
+# was evaluated as a factor and intentionally excluded (no measured edge; see
+# docs/entry-panel-design.md §9).
 ENTRY_WEIGHTS: Dict[str, Dict[str, float]] = {
     "day": {"trend": 1.0, "location": 2.0, "cost_basis": 1.0, "trigger": 2.0, "volume": 2.0, "rs": 1.0},
     "swing": {"trend": 1.5, "location": 2.0, "cost_basis": 1.0, "trigger": 2.0, "volume": 1.0, "rs": 1.5},
@@ -398,7 +400,13 @@ def _rs_subscore(rs_read: str) -> Optional[float]:
 
 
 def grade_setup(summary: dict, strategy_type: str, direction: str) -> dict:
-    """Compute the composite 0-100 Entry Score, its A/B/C grade, and components."""
+    """Compute two independent reads and their components.
+
+    Returns a Setup Quality score (0-100) + A/B/C grade from the name-strength factors
+    (trend, relative strength, cost basis, volume) and an Entry Timing state
+    (Ready / Fair / Stretched) from the timing factors (location, RSI trigger), so a
+    strong-but-extended name isn't scored as a good entry.
+    """
     cfg = ENTRY_CONFIG[strategy_type]
     weights = ENTRY_WEIGHTS[strategy_type]
     is_long = direction.lower() == "long"
@@ -444,7 +452,7 @@ def grade_setup(summary: dict, strategy_type: str, direction: str) -> dict:
 
     components = []
 
-    def add(factor, value, read, weight, sub):
+    def add(factor, value, read, weight, sub, group):
         components.append(
             {
                 "Factor": factor,
@@ -452,53 +460,75 @@ def grade_setup(summary: dict, strategy_type: str, direction: str) -> dict:
                 "Read": read,
                 "Weight": weight,
                 "Score": round(sub * 100) if sub is not None else None,
+                "Group": group,
                 "_w": weight,
                 "_sub": sub,
             }
         )
 
-    add("Trend alignment", ta, "Pass" if aligned_ok else "Fail", weights["trend"], trend_sub)
-    add("Location", f"{loc} ({dist_str})", "Pass" if loc_ok else "Fail", weights["location"], loc_sub)
+    # Quality factors answer "is this a strong name?"; timing factors answer "is now a
+    # good moment to enter?" — the two reads are kept separate so a strong-but-extended
+    # name can't have its poor timing averaged away.
+    add("Trend alignment", ta, "Pass" if aligned_ok else "Fail", weights["trend"], trend_sub, "Quality")
     if cost_sub is None:
-        add("Cost basis", "N/A", "N/A", weights["cost_basis"], None)
+        add("Cost basis", "N/A", "N/A", weights["cost_basis"], None, "Quality")
     else:
-        add("Cost basis", cb, "Pass" if cb == "Clean" else "Fail", weights["cost_basis"], cost_sub)
-    add("Trigger (RSI)", f"{rsi_state} ({rsi_str})", "Pass" if trigger_ok else "Fail", weights["trigger"], trig_sub)
+        add("Cost basis", cb, "Pass" if cb == "Clean" else "Fail", weights["cost_basis"], cost_sub, "Quality")
     if vol_sub is None:
-        add("Rel volume", "N/A", "N/A", weights["volume"], None)
+        add("Rel volume", "N/A", "N/A", weights["volume"], None, "Quality")
     else:
         vol_read = "Pass" if vol_confirm else ("Neutral" if not cfg["vol_required"] else "Fail")
-        add("Rel volume", relv_str, vol_read, weights["volume"], vol_sub)
+        add("Rel volume", relv_str, vol_read, weights["volume"], vol_sub, "Quality")
     if rs_sub is None:
-        add("Rel strength", "N/A", "N/A", weights["rs"], None)
+        add("Rel strength", "N/A", "N/A", weights["rs"], None, "Quality")
     else:
         rs_value = f"{rs_read} ({rsret_str})" if rsret_str else rs_read
-        add("Rel strength", rs_value, "Pass" if rs_ok else "Fail", weights["rs"], rs_sub)
+        add("Rel strength", rs_value, "Pass" if rs_ok else "Fail", weights["rs"], rs_sub, "Quality")
+    add("Location", f"{loc} ({dist_str})", "Pass" if loc_ok else "Fail", weights["location"], loc_sub, "Timing")
+    add("Trigger (RSI)", f"{rsi_state} ({rsi_str})", "Pass" if trigger_ok else "Fail", weights["trigger"], trig_sub, "Timing")
 
-    scored = [c for c in components if c["_sub"] is not None]
-    total_w = sum(c["_w"] for c in scored)
-    score = (
-        round(100.0 * sum(c["_w"] * c["_sub"] for c in scored) / total_w, 1)
-        if total_w > 0
-        else np.nan
-    )
+    def _weighted_frac(rows):
+        scored = [c for c in rows if c["_sub"] is not None]
+        total_w = sum(c["_w"] for c in scored)
+        if total_w <= 0:
+            return np.nan
+        return sum(c["_w"] * c["_sub"] for c in scored) / total_w
 
-    if not pd.isna(score) and score >= 75:
-        grade = "A"
-    elif not pd.isna(score) and score >= 55:
-        grade = "B"
+    quality_frac = _weighted_frac([c for c in components if c["Group"] == "Quality"])
+    timing_frac = _weighted_frac([c for c in components if c["Group"] == "Timing"])
+
+    quality_score = round(100.0 * quality_frac, 1) if not pd.isna(quality_frac) else np.nan
+    timing_score = round(100.0 * timing_frac, 1) if not pd.isna(timing_frac) else np.nan
+
+    if not pd.isna(quality_score) and quality_score >= 75:
+        quality_grade = "A"
+    elif not pd.isna(quality_score) and quality_score >= 55:
+        quality_grade = "B"
     else:
-        grade = "C"
+        quality_grade = "C"
 
-    reason_parts = [ta, f"{loc} location", f"RSI {rsi_state}"]
+    if pd.isna(timing_frac):
+        timing_state = "n/a"
+    elif timing_frac >= 0.66:
+        timing_state = "Ready"
+    elif timing_frac >= 0.33:
+        timing_state = "Fair"
+    else:
+        timing_state = "Stretched"
+
+    quality_parts = [ta]
     if rs_read not in ("N/A", "nan", "None"):
-        reason_parts.append(f"{rs_read} RS")
-    reason = " · ".join(reason_parts)
+        quality_parts.append(f"{rs_read} RS")
+    quality_reason = " · ".join(quality_parts)
+    timing_reason = f"{loc} location · RSI {rsi_state}"
 
     return {
-        "grade": grade,
-        "score": score,
-        "reason": reason,
+        "quality_grade": quality_grade,
+        "quality_score": quality_score,
+        "timing_state": timing_state,
+        "timing_score": timing_score,
+        "quality_reason": quality_reason,
+        "timing_reason": timing_reason,
         "components": [
             {k: v for k, v in c.items() if not k.startswith("_")} for c in components
         ],
@@ -1051,8 +1081,9 @@ def generate_stop_for_ticker(
 
     stop.update(
         {
-            "Entry Score": vol_summary["grade"]["score"],
-            "Setup Grade": vol_summary["grade"]["grade"],
+            "Quality Score": vol_summary["grade"]["quality_score"],
+            "Quality Grade": vol_summary["grade"]["quality_grade"],
+            "Timing": vol_summary["grade"]["timing_state"],
             "Trend Alignment": vol_summary["trend_alignment"],
             "Location": vol_summary["location_state"],
             "RSI": round(vol_summary["rsi"], 1) if not pd.isna(vol_summary["rsi"]) else np.nan,
@@ -1184,19 +1215,31 @@ def render_entry_panel(
         "recommendation."
     )
 
-    grade_letter = grade["grade"]
-    score = grade.get("score", np.nan)
-    score_str = f"{score:.0f}/100" if not pd.isna(score) else "n/a"
+    quality_grade = grade["quality_grade"]
+    quality_score = grade.get("quality_score", np.nan)
+    q_score_str = f"{quality_score:.0f}/100" if not pd.isna(quality_score) else "n/a"
+    timing_state = grade["timing_state"]
     grade_colors = {"A": "#1a7f37", "B": "#9a6700", "C": "#6e7781"}
-    color = grade_colors.get(grade_letter, "#6e7781")
+    timing_colors = {"Ready": "#1a7f37", "Fair": "#9a6700", "Stretched": "#6e7781"}
+    q_color = grade_colors.get(quality_grade, "#6e7781")
+    t_color = timing_colors.get(timing_state, "#6e7781")
     st.markdown(
         f"<div style='font-size:1.05rem;margin-bottom:0.5rem'>"
-        f"<span style='background:{color};color:white;padding:2px 12px;border-radius:6px;"
-        f"font-weight:700;margin-right:10px'>{grade_letter}</span>"
-        f"<span style='font-weight:700;margin-right:10px'>Entry Score {score_str}</span>"
-        f"<span style='color:#444'>{grade['reason']}</span></div>",
+        f"<span style='background:{q_color};color:white;padding:2px 12px;border-radius:6px;"
+        f"font-weight:700;margin-right:10px'>Quality {quality_grade}</span>"
+        f"<span style='font-weight:700;margin-right:14px'>{q_score_str}</span>"
+        f"<span style='background:{t_color};color:white;padding:2px 12px;border-radius:6px;"
+        f"font-weight:700;margin-right:10px'>Timing: {timing_state}</span>"
+        f"<span style='color:#444'>{grade['quality_reason']} · {grade['timing_reason']}</span>"
+        f"</div>",
         unsafe_allow_html=True,
     )
+    if quality_grade in ("A", "B") and timing_state == "Stretched":
+        st.warning(
+            "Strong setup quality, but the entry looks stretched "
+            f"({grade['timing_reason']}). This grades the *name*, not the moment — "
+            "consider waiting for a pullback toward rising support rather than chasing."
+        )
 
     ctrl = st.columns(2)
     default_entry = float(summary["entry_price"])
@@ -1280,9 +1323,21 @@ def render_entry_panel(
     chart, _ = build_price_chart(hist, summary, direction_panel)
     st.altair_chart(chart, width="stretch")
 
-    st.caption("Setup components (Score is each factor's 0-100 sub-score; Weight is its share of the Entry Score)")
     comp_df = pd.DataFrame(grade["components"])
-    st.dataframe(comp_df, width="stretch", hide_index=True)
+    display_cols = ["Factor", "Value", "Read", "Weight", "Score"]
+    q_cols, t_cols = st.columns(2)
+    with q_cols:
+        st.caption("Setup quality — is this a strong name? (Score is each factor's 0-100 sub-score; Weight is its share of the Quality grade)")
+        st.dataframe(
+            comp_df[comp_df["Group"] == "Quality"][display_cols],
+            width="stretch", hide_index=True,
+        )
+    with t_cols:
+        st.caption("Entry timing — is now a good moment? (Ready / Fair / Stretched from these factors)")
+        st.dataframe(
+            comp_df[comp_df["Group"] == "Timing"][display_cols],
+            width="stretch", hide_index=True,
+        )
 
     backtest = summary.get("backtest")
     if backtest and backtest.get("signals", 0) > 0:
@@ -1363,16 +1418,20 @@ def render_entry_panel(
             The Entry Panel adds **entry timing** context on top of the existing stop/risk engine,
             so a full trade plan reads as `entry → stop → target → reward:risk → size`.
 
-            - **Entry Score (0-100)** is a weighted blend of direction-aware sub-scores: trend
-              alignment, location vs. support (in ATR), cost basis, the RSI trigger, relative
-              volume, and relative strength vs. the benchmark. Each factor scores 0-100 and is
-              weighted per strategy (e.g. trend leans on alignment and relative strength). Factors
-              with missing data are excluded and the rest are renormalized. The **A/B/C grade** is
-              derived from the score (A ≥ 75, B ≥ 55, else C).
-            - **Location** measures distance from MA50 in ATR units — a shallow pullback toward
-              rising support scores better than chasing an extended move.
-            - **Trigger (RSI)** favors a pullback that is resetting back up (for longs) rather than
-              a chase at overbought.
+            It reads two things separately, because a strong name and a good *moment* aren't the
+            same question:
+
+            - **Setup Quality (0-100 + A/B/C grade)** answers *is this a strong name?* — a
+              weighted blend of trend alignment, relative strength vs. the benchmark, cost basis,
+              and relative volume. Weighted per strategy, missing factors excluded and renormalized;
+              the grade is A ≥ 75, B ≥ 55, else C.
+            - **Entry Timing (Ready / Fair / Stretched)** answers *is now a good moment?* — from
+              location vs. support (in ATR) and the RSI trigger. **Location** rewards a shallow
+              pullback toward rising support over chasing an extended move; **Trigger (RSI)** favors
+              a reset back up (for longs) over a chase at overbought.
+            - Keeping them apart means a high-quality but **Stretched** name is flagged as one to
+              *wait on* rather than getting an averaged-away green light — the panel warns when
+              Quality is A/B but Timing is Stretched.
             - **Planned entry** lets you model the plan at any price; the stop *distance* stays
               fixed (it is volatility-based), while the stop price, risk %, and shares update.
             - **Target** is the nearest recent swing level (structure) or a fixed ATR multiple,
@@ -1394,10 +1453,13 @@ def render_help_reference() -> None:
     st.markdown(
         """
         This app plans a full trade — **where to enter, where to exit, and how much to risk** — and
-        scores how good each setup is. For every ticker it grades the setup `0-100` (A/B/C) from
-        direction-aware factors (trend alignment, location vs. support, cost basis, RSI trigger,
-        relative volume, and relative strength), then pairs that entry read with a volatility-based
-        ATR stop, a structure/ATR target, reward:risk, and optional position sizing. A look-ahead-safe
+        reads each setup on two separate axes: **Setup Quality** (*is this a strong name?* — a
+        `0-100` score and A/B/C grade from trend alignment, relative strength, cost basis, and
+        relative volume) and **Entry Timing** (*is now a good moment?* — Ready / Fair / Stretched
+        from location vs. support and the RSI trigger). Keeping them apart means a strong but
+        extended name shows high Quality **and** Stretched Timing, rather than one blended number
+        that hides the chase. It then pairs those reads with a volatility-based ATR stop, a
+        structure/ATR target, reward:risk, and optional position sizing, and a look-ahead-safe
         signal replay estimates how each setup type has historically resolved.
 
         The **ATR stop** sets the risk leg: stop distance is the ticker's Average True Range times a
@@ -1477,22 +1539,29 @@ def render_help_reference() -> None:
 
             #### 2. Triage with the Setup Scanner
             The scanner ranks your whole watchlist by setup quality. Start at the top:
-            - Rank by **Entry Score** to find the highest-quality setups, or by **Reward:Risk** to find
+            - Rank by **Quality Score** to find the strongest names, or by **Reward:Risk** to find
               the most asymmetric ones.
-            - Filter to **A/B grades** and set a **Min Reward:Risk** (e.g. 2.0) to hide weak ideas.
+            - Filter to **A/B quality grades**, set a **Timing** filter to `Ready` when you want
+              pullback-ready entries (not extended chases), and set a **Min Reward:Risk** (e.g. 2.0)
+              to hide weak ideas.
             - Only the names that survive triage are worth a closer look.
 
             #### 3. Drill into a candidate (Entry Plan)
-            Pick a ticker and read its **Entry Score (0-100) and grade**. The component table shows
-            *why*, factor by factor. The strongest setups usually line up like this:
-            - **Trend alignment:** price stacked with MA50/MA200 in your direction.
-            - **Location:** `At Support` or `Near` — a shallow pullback toward rising support beats
-              chasing an `Extended` move (location is measured in ATR units).
-            - **Trigger (RSI):** `Resetting Up` (longs) — momentum turning back your way, not an
-              exhausted chase at overbought.
-            - **Relative strength:** `Leader` or `Improving Laggard` vs. the benchmark.
+            Pick a ticker and read its two badges: **Setup Quality (0-100 + grade)** for name
+            strength and **Entry Timing (Ready / Fair / Stretched)** for whether now is the moment.
+            The two component tables show *why*, factor by factor. The strongest, best-timed setups
+            line up like this:
+            - **Trend alignment:** price stacked with MA50/MA200 in your direction. *(Quality)*
+            - **Relative strength:** `Leader` or `Improving Laggard` vs. the benchmark. *(Quality)*
             - **Cost basis / volume:** price above VWAP (clean) and, for breakout strategies, a volume
-              surge confirming the move.
+              surge confirming the move. *(Quality)*
+            - **Location:** `At Support` or `Near` — a shallow pullback toward rising support beats
+              chasing an `Extended` move (location is measured in ATR units). *(Timing)*
+            - **Trigger (RSI):** `Resetting Up` (longs) — momentum turning back your way, not an
+              exhausted chase at overbought. *(Timing)*
+
+            A high Quality grade with **Stretched** timing means a strong name at a poor entry — wait
+            for a pullback rather than chasing; the panel flags this for you.
 
             #### 4. Build the trade plan
             - Set a **Planned entry** (the price you'd actually buy/short). The stop *distance* is
@@ -1533,9 +1602,9 @@ def render_scanner(result_df: pd.DataFrame) -> None:
         "ideas first. Educational ranking only, not trade advice."
     )
 
-    scan_controls = st.columns([2, 1, 1])
+    scan_controls = st.columns([2, 1, 1, 1])
     sort_options = {
-        "Entry Score": ("Entry Score", False),
+        "Quality Score": ("Quality Score", False),
         "Reward:Risk": ("Reward:Risk", False),
         "Signal Win %": ("Signal Win %", False),
         "Signal Avg R": ("Signal Avg R", False),
@@ -1545,15 +1614,21 @@ def render_scanner(result_df: pd.DataFrame) -> None:
         "Rank by",
         options=list(sort_options.keys()),
         index=0,
-        help="Choose the metric used to rank your watchlist.",
+        help="Choose the metric used to rank your watchlist. Quality Score ranks name strength, not entry timing.",
     )
     grade_filter = scan_controls[1].multiselect(
-        "Grades",
+        "Quality grade",
         options=["A", "B", "C"],
         default=["A", "B", "C"],
-        help="Show only setups with these grades.",
+        help="Show only setups with these Setup Quality grades.",
     )
-    min_rr = scan_controls[2].number_input(
+    timing_filter = scan_controls[2].multiselect(
+        "Timing",
+        options=["Ready", "Fair", "Stretched"],
+        default=["Ready", "Fair", "Stretched"],
+        help="Show only setups with these entry-timing reads. Pick 'Ready' to find pullback-ready entries.",
+    )
+    min_rr = scan_controls[3].number_input(
         "Min Reward:Risk",
         min_value=0.0,
         max_value=10.0,
@@ -1564,8 +1639,10 @@ def render_scanner(result_df: pd.DataFrame) -> None:
 
     sort_col, ascending = sort_options[sort_choice]
     scan_df = result_df.copy()
-    if "Setup Grade" in scan_df.columns and grade_filter:
-        scan_df = scan_df[scan_df["Setup Grade"].isin(grade_filter)]
+    if "Quality Grade" in scan_df.columns and grade_filter:
+        scan_df = scan_df[scan_df["Quality Grade"].isin(grade_filter)]
+    if "Timing" in scan_df.columns and timing_filter:
+        scan_df = scan_df[scan_df["Timing"].isin(timing_filter)]
     if min_rr > 0 and "Reward:Risk" in scan_df.columns:
         scan_df = scan_df[scan_df["Reward:Risk"].fillna(0) >= min_rr]
 
@@ -1577,7 +1654,7 @@ def render_scanner(result_df: pd.DataFrame) -> None:
         scanner_cols = [
             c
             for c in [
-                "Ticker", "Type", "Direction", "Setup Grade", "Entry Score",
+                "Ticker", "Type", "Direction", "Quality Grade", "Quality Score", "Timing",
                 "Reward:Risk", "Risk % to Stop", "Trend Alignment", "Location",
                 "RSI State", "Rel Strength", "Signal Win %", "Signal Avg R", "Regime",
             ]
@@ -1589,8 +1666,9 @@ def render_scanner(result_df: pd.DataFrame) -> None:
         top = scan_df.iloc[0]
         st.caption(
             f"Top setup by {sort_choice}: **{top['Ticker']}** "
-            f"(Grade {top.get('Setup Grade', 'n/a')}, "
-            f"Entry Score {top.get('Entry Score', 'n/a')}, "
+            f"(Quality {top.get('Quality Grade', 'n/a')} "
+            f"{top.get('Quality Score', 'n/a')}, "
+            f"Timing {top.get('Timing', 'n/a')}, "
             f"Reward:Risk {top.get('Reward:Risk', 'n/a')})."
         )
 
