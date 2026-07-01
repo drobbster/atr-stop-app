@@ -42,10 +42,12 @@ Click **Analyze Setups** to run the whole watchlist.
 The **Setup Scanner** ranks your entire watchlist by setup quality so you spend attention
 on the best opportunities first.
 
-- **Rank by Entry Score** to surface the highest-quality setups overall.
+- **Rank by Quality Score** to surface the strongest names overall.
 - **Rank by Reward:Risk** to find the most asymmetric opportunities.
 - **Rank by Signal Win % / Avg R** to lean on historical behavior of that signal type.
-- **Filter to A/B grades** and set a **Min Reward:Risk** (e.g. `2.0`) to hide weak ideas.
+- **Filter to A/B quality grades**, set the **Timing** filter to `Ready` when you want
+  pullback-ready entries (skip `Stretched` chases), and set a **Min Reward:Risk** (e.g.
+  `2.0`) to hide weak ideas.
 
 Only the names that survive triage are worth a deeper look. The top row is highlighted in
 the caption beneath the table.
@@ -54,21 +56,26 @@ the caption beneath the table.
 
 ## Step 3 — Drill into a candidate (Entry Panel)
 
-Select a ticker and read its **Entry Score (0-100)** and **grade (A/B/C)**. The component
-table shows *why*, factor by factor (each factor's 0-100 sub-score and its weight). The
-strongest setups generally line up like this (long example; shorts mirror it):
+Select a ticker and read its two badges: **Setup Quality (0-100 + A/B/C grade)** for how
+strong the name is, and **Entry Timing (Ready / Fair / Stretched)** for whether now is a
+good moment. Two component tables show *why*, factor by factor (each factor's 0-100
+sub-score and its weight). The strongest, best-timed setups generally line up like this
+(long example; shorts mirror it):
 
-- **Trend alignment** — price stacked with MA50/MA200 in your direction.
-- **Location** — `At Support` or `Near`. A shallow pullback toward rising support beats
-  chasing an `Extended` move. Location is measured in **ATR units** from MA50.
-- **Trigger (RSI)** — `Resetting Up`: momentum turning back your way rather than an
-  exhausted chase at overbought.
-- **Relative strength** — `Leader` or `Improving Laggard` versus the benchmark.
+- **Trend alignment** — price stacked with MA50/MA200 in your direction. *(Quality)*
+- **Relative strength** — `Leader` or `Improving Laggard` versus the benchmark. *(Quality)*
 - **Cost basis / volume** — price above VWAP (`Clean`), and for breakout strategies a
-  **volume surge** confirming the move.
+  **volume surge** confirming the move. *(Quality)*
+- **Location** — `At Support` or `Near`. A shallow pullback toward rising support beats
+  chasing an `Extended` move. Location is measured in **ATR units** from MA50. *(Timing)*
+- **Trigger (RSI)** — `Resetting Up`: momentum turning back your way rather than an
+  exhausted chase at overbought. *(Timing)*
 
-Factors with missing data are excluded from the score (and the weights renormalize), so a
-missing series lowers confidence rather than unfairly tanking the grade.
+Because the two reads are independent, a strong name can score **Quality A** while its
+**Timing is Stretched** (extended, overbought) — that means wait for a pullback rather than
+chase. The panel shows a warning when this happens. Factors with missing data are excluded
+from their axis (weights renormalize), so a missing series lowers confidence rather than
+unfairly tanking the read.
 
 ---
 
@@ -131,7 +138,8 @@ this workflow is designed to surface.
 
 ## Field reference (quick)
 
-- **Entry Score / Setup Grade** — composite 0-100 quality score and its A/B/C grade.
+- **Quality Score / Quality Grade** — 0-100 name-strength score (trend, relative strength, cost basis, volume) and its A/B/C grade.
+- **Timing** — entry-timing read (Ready / Fair / Stretched) from location vs. support and the RSI trigger.
 - **Location** — distance from MA50 in ATR units (At Support / Near / Neutral / Extended).
 - **Target / Reward:Risk** — estimated target and reward-to-risk in R.
 - **Signal Win % / Signal Avg R** — historical hit-rate and average R from the signal replay.

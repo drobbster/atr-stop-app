@@ -499,20 +499,20 @@ trade recommendation."
 
 ## 7. Roadmap beyond Phase 2
 
-> **Status:** items 1–3 have since shipped. The coarse A/B/C tag is now derived from a
-> composite **0–100 Entry Score** (weighted in `ENTRY_WEIGHTS`), a look-ahead-safe
-> **signal replay** reports win-rate / average-R / expectancy per ticker, and the
-> **Setup Scanner** ranks a whole watchlist. An RSI-divergence factor was prototyped and
-> then **rejected** after backtesting — see the §9 decision record. Items 4–5 remain deferred.
+> **Status:** items 1–3 have since shipped, and the single Entry Score was later **split
+> into two independent reads** (Setup Quality + Entry Timing) — see the §10 decision record.
+> A look-ahead-safe **signal replay** reports win-rate / average-R / expectancy per ticker,
+> and the **Setup Scanner** ranks a whole watchlist. An RSI-divergence factor was prototyped
+> and then **rejected** after backtesting — see the §9 decision record. Items 4–5 remain deferred.
 
-1. ~~**Composite numeric Entry Score**~~ — *shipped.* Weights the validated components
-   into a single 0–100 score (`grade_setup` + `ENTRY_WEIGHTS`); the A/B/C grade is now
-   derived from it (A ≥ 75, B ≥ 55, else C).
+1. ~~**Composite numeric Entry Score**~~ — *shipped, then superseded.* Originally a single
+   weighted 0–100 score (`grade_setup` + `ENTRY_WEIGHTS`); now split into a Setup Quality
+   score/grade and an Entry Timing state (§10).
 2. ~~**Backtest markers & stats**~~ — *shipped.* The signal replay walks every historical
    trigger forward with the same ATR stop and an ATR-multiple target and reports win
    rate, average R, and expectancy.
-3. ~~**Scanner mode**~~ — *shipped.* The Setup Scanner ranks a watchlist by Entry Score /
-   Reward:Risk with grade and Reward:Risk filters.
+3. ~~**Scanner mode**~~ — *shipped.* The Setup Scanner ranks a watchlist by Quality Score /
+   Reward:Risk with quality-grade, timing, and Reward:Risk filters.
 4. **Intraday entries** — opening-range / intraday VWAP for the `day` bucket (new data
    cadence).
 5. **Alerts & earnings-date awareness** — "notify on pullback to MA50 within 0.5 ATR";
@@ -585,3 +585,49 @@ If revisited, do it *only* behind the deferred backtest harness (§7), test a *s
 conditional* setup (e.g. divergence + extended location + overbought) rather than a blanket
 read, and require it to clear a pre-registered edge threshold before it goes anywhere near
 the score — do **not** reinstate it as an always-on indicator.
+
+---
+
+## 10. Single Entry Score → two-axis read (decision record)
+
+> **Status: shipped.** The single blended Entry Score was replaced with two independent
+> reads: **Setup Quality** and **Entry Timing**. `grade_setup` returns both.
+
+### 10.1 Why
+
+The composite Entry Score blended two questions a trader keeps separate: *is this a strong
+name?* and *is now a good moment to enter?* Because the timing factors (location, RSI
+trigger) are a minority of the per-strategy weight (~28% for `trend`), a strong-but-extended
+leader (e.g. MU: Aligned Long, Leader, Clean, volume — but `Location: Extended` and
+`Trigger: Overbought`) still cleared the A threshold. The single green "A" read as "enter
+now" even though two factors were explicitly failing. This is a semantics problem the
+one-number UI amplified, not a bug in the factor math.
+
+### 10.2 The split
+
+`grade_setup` partitions the same six sub-scores (unchanged) into two groups and computes a
+weighted average within each (renormalized over applicable factors):
+
+- **Setup Quality** — `trend`, `rs`, `cost_basis`, `volume` → 0–100 score + A/B/C grade
+  (A ≥ 75, B ≥ 55, else C).
+- **Entry Timing** — `location`, `trigger` → internal 0–1 fraction mapped to a state:
+  **Ready** (≥ 0.66), **Fair** (≥ 0.33), **Stretched** (< 0.33).
+
+The return dict is `{quality_grade, quality_score, timing_state, timing_score,
+quality_reason, timing_reason, components}`; each component row carries a `Group`
+("Quality"/"Timing") tag so the panel can render two tables.
+
+### 10.3 Surfacing
+
+- **Entry Panel:** two badges (Quality grade + score, Timing state) and two component
+  tables. A `st.warning` fires when Quality is A/B but Timing is Stretched ("strong name,
+  poor entry — wait for a pullback").
+- **Scanner:** `Quality Grade`, `Quality Score`, and `Timing` columns; sort defaults to
+  Quality Score; filters for quality grade and timing (pick `Ready` to isolate
+  pullback-ready entries).
+
+### 10.4 Deliberately not done
+
+No hard veto or grade cap when a name is Extended/Overbought — that would suppress
+legitimately strong trend names on an unvalidated rule (same discipline that led to
+rejecting RSI divergence, §9). Timing is surfaced alongside Quality, not used to gate it.

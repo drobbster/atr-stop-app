@@ -6,7 +6,8 @@ the regime-aware ATR stop is now the risk leg of a broader entry/exit planner.)
 
 The app is an educational decision-support tool. It helps answer:
 
-- How good is this setup right now (0-100 Entry Score and A/B/C grade)?
+- How strong is this name (Setup Quality: 0-100 score and A/B/C grade)?
+- Is now a good moment to enter it (Entry Timing: Ready / Fair / Stretched)?
 - Which names on my watchlist deserve attention first (Setup Scanner)?
 - Where would the entry, stop, and target sit, and is the reward:risk asymmetric?
 - How volatile is this ticker, and what volatility regime is it in?
@@ -18,10 +19,11 @@ The app is an educational decision-support tool. It helps answer:
 ### Setup Scanner
 
 When you analyze more than one ticker, the **Setup Scanner** ranks the whole watchlist so
-you can triage the best opportunities first. Sort by **Entry Score** (highest-quality
-setups), **Reward:Risk** (most asymmetric), or **Signal Win % / Avg R**, and filter to
-**A/B grades** with a **minimum Reward:Risk** to hide weak ideas. Results also include the
-per-ticker chart/detail and the full Entry/Exit Plan in separate tabs, plus a CSV export.
+you can triage the best opportunities first. Sort by **Quality Score** (strongest names),
+**Reward:Risk** (most asymmetric), or **Signal Win % / Avg R**, and filter by **quality
+grade (A/B/C)**, **entry timing (Ready / Fair / Stretched)**, and a **minimum Reward:Risk**
+to hide weak ideas. Results also include the per-ticker chart/detail and the full Entry/Exit
+Plan in separate tabs, plus a CSV export.
 
 ### Regime-Aware ATR Stops
 
@@ -71,21 +73,26 @@ While the stop logic answers *where to exit*, the Entry Panel adds context for *
 enter*, so a full plan reads as `entry → stop → target → reward:risk → size`. For the
 selected ticker it shows:
 
-- **Entry Score (0-100)** and **grade (A/B/C)**: a composite, explainable score that
-  weights direction-aware sub-scores — trend alignment, location vs. support (in ATR),
-  cost basis, the RSI trigger, relative volume, and relative strength vs. a benchmark.
-  Each factor scores 0-100 and is weighted per strategy; factors with missing data are
-  excluded and the rest are renormalized. The grade is derived from the score
-  (A ≥ 75, B ≥ 55, else C).
+The read is split onto two independent axes so a strong-but-extended name can't have its
+poor timing averaged away:
+
+- **Setup Quality (0-100 score + A/B/C grade)** answers *is this a strong name?* It weights
+  the name-strength sub-scores — trend alignment, relative strength vs. a benchmark, cost
+  basis, and relative volume. Each factor scores 0-100 and is weighted per strategy; factors
+  with missing data are excluded and the rest are renormalized. The grade is derived from the
+  score (A ≥ 75, B ≥ 55, else C).
+- **Entry Timing (Ready / Fair / Stretched)** answers *is now a good moment?* It reads the
+  two timing factors — location vs. support and the RSI trigger. The panel warns when Quality
+  is A/B but Timing is Stretched (a strong name at a poor entry).
 - **Trend alignment**: whether `Close`, `MA50`, and `MA200` are stacked in the trade's
-  direction.
+  direction. *(Quality)*
+- **Relative volume** and **relative strength** vs. the selected benchmark (`SPY` by
+  default) as confirmation and leadership signals. *(Quality)*
 - **Location state**: distance from `MA50` measured in ATR units, classified as
   `At Support` / `Near` / `Neutral` / `Extended`. A shallow pullback toward rising
-  support scores better than chasing an extended move.
+  support reads better than chasing an extended move. *(Timing)*
 - **RSI trigger**: a Wilder RSI(14) state that favors a pullback resetting back up (for
-  longs) rather than a chase at overbought.
-- **Relative volume** and **relative strength** vs. the selected benchmark (`SPY` by
-  default) as confirmation and leadership signals.
+  longs) rather than a chase at overbought. *(Timing)*
 - **Planned entry**: model the plan at any entry price. The stop *distance* stays fixed
   (it is volatility-based), while the stop price, risk %, and shares update.
 - **Target & Reward:Risk**: a target from the nearest recent swing level (structure) or
@@ -132,8 +139,9 @@ trade recommendations.
 - `Trend Strength`: percent above or below the 50-day moving average.
 - `Long-Term Trend`: percent above or below the 200-day moving average.
 - `VWAP Strength`: percent above or below the 50-day volume-weighted average price.
-- `Entry Score`: composite 0-100 entry-quality score from the weighted Entry Panel factors.
-- `Setup Grade`: A/B/C grade derived from the Entry Score.
+- `Quality Score`: 0-100 name-strength score from the weighted quality factors (trend, relative strength, cost basis, volume).
+- `Quality Grade`: A/B/C grade derived from the Quality Score (A ≥ 75, B ≥ 55, else C).
+- `Timing`: entry-timing read (Ready / Fair / Stretched) from location vs. support and the RSI trigger.
 - `Location`: distance from `MA50` in ATR units, bucketed (At Support / Near / Neutral / Extended).
 - `Target`: estimated target price (nearest swing level or ATR multiple).
 - `Reward:Risk`: distance to target divided by stop distance, expressed in R.
