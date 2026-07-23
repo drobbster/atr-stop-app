@@ -163,6 +163,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Use it online
+
+https://trade-setup-planner-app.streamlit.app/
+
 ## Deploy
 
 Deploy with Streamlit Community Cloud:
